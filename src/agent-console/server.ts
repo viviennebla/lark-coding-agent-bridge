@@ -714,7 +714,10 @@ async function serveStatic(
   }
   const bytes = await readFile(resolved);
   writeCors(res, port);
-  res.writeHead(200, { 'content-type': contentTypeFor(resolved) });
+  res.writeHead(200, {
+    'cache-control': 'no-store, max-age=0',
+    'content-type': contentTypeFor(resolved),
+  });
   res.end(bytes);
 }
 

@@ -43,6 +43,10 @@ describe('Agent Console server', () => {
       body: JSON.stringify({ command: 'interrupt' }),
     });
     expect(unauthMessage.status).toBe(403);
+
+    const appJs = await fetch(`${h.console.baseUrl}/app.js`);
+    expect(appJs.status).toBe(200);
+    expect(appJs.headers.get('cache-control')).toBe('no-store, max-age=0');
   });
 
   it('lists local skills with token auth and query filtering', async () => {
