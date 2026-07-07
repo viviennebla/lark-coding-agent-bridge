@@ -323,14 +323,7 @@ function appendEvent(event) {
   if (!markEventSeen(event)) return;
   rememberServerEvent(event);
   applyRealtimeStatus(event);
-  if (event.type === "message.assistant.delta") {
-    mergeAssistantDelta(event);
-  } else if (event.type === "message.assistant.final") {
-    mergeAssistantFinal(event);
-  } else {
-    state.pendingAssistant = null;
-    state.events.push(normalizeEvent(event));
-  }
+  ingestConsoleEvent(event);
 
   if (state.events.length > MAX_EVENTS) {
     state.events.splice(0, state.events.length - MAX_EVENTS);
@@ -355,8 +348,7 @@ function mergeSnapshotEvents(events) {
 
     if (!markEventSeen(event)) return;
     rememberServerEvent(event);
-    state.pendingAssistant = null;
-    state.events.push(normalizeEvent(event));
+    ingestConsoleEvent(event);
     changed = true;
   });
 
@@ -423,36 +415,76 @@ function normalizeEvent(event) {
   return event;
 }
 
-function mergeAssistantDelta(event) {
-  const last = state.events[state.events.length - 1];
-  const nextText = event.text || "";
-  if (last && (last.type === "message.assistant.delta" || last.type === "message.assistant.final")) {
-    last.type = "message.assistant.delta";
-    last.text = `${last.text || ""}${nextText}`;
-    last.timestamp = event.timestamp;
-    last.payload = { ...last.payload, ...event.payload };
-    state.pendingAssistant = last;
+function ingestConsoleEvent(event) {
+  if (event.type === "message.assistant.delta") {
+    mergeAssistantDelta(event);
+    return;
+  }
+  if (event.type === "message.assistant.final") {
+    mergeAssistantFinal(event);
     return;
   }
 
-  const merged = { ...event, text: nextText };
+  state.events.push(normalizeEvent(event));
+}
+
+function mergeAssistantDelta(event) {
+  const entry = findAssistantStreamEntry(event);
+  const target = entry?.event;
+  const nextText = event.text || "";
+  if (target && target.type !== "message.assistant.final") {
+    target.type = "message.assistant.delta";
+    target.text = `${target.text || ""}${nextText}`;
+    target.timestamp = event.timestamp;
+    target.payload = { ...target.payload, ...event.payload };
+    moveEventToEnd(entry.index);
+    state.pendingAssistant = target;
+    return;
+  }
+
+  const merged = normalizeEvent({ ...event, text: nextText });
   state.events.push(merged);
   state.pendingAssistant = merged;
 }
 
 function mergeAssistantFinal(event) {
-  const last = state.events[state.events.length - 1];
-  if (last && (last.type === "message.assistant.delta" || last.type === "message.assistant.final") && last.runId === event.runId) {
-    last.type = "message.assistant.final";
-    last.text = event.text || last.text || "";
-    last.timestamp = event.timestamp;
-    last.payload = { ...last.payload, ...event.payload };
+  const entry = findAssistantStreamEntry(event);
+  const target = entry?.event;
+  if (target) {
+    target.type = "message.assistant.final";
+    target.text = event.text || target.text || "";
+    target.timestamp = event.timestamp;
+    target.payload = { ...target.payload, ...event.payload };
+    moveEventToEnd(entry.index);
     state.pendingAssistant = null;
     return;
   }
 
   state.pendingAssistant = null;
   state.events.push(normalizeEvent(event));
+}
+
+function findAssistantStreamEntry(event) {
+  if (event.runId) {
+    for (let index = state.events.length - 1; index >= 0; index -= 1) {
+      const candidate = state.events[index];
+      if (candidate.runId === event.runId && candidate.type?.startsWith("message.assistant")) {
+        return { event: candidate, index };
+      }
+    }
+  }
+
+  const last = state.events[state.events.length - 1];
+  if (!event.runId && last?.type?.startsWith("message.assistant")) {
+    return { event: last, index: state.events.length - 1 };
+  }
+  return null;
+}
+
+function moveEventToEnd(index) {
+  if (index < 0 || index === state.events.length - 1) return;
+  const [event] = state.events.splice(index, 1);
+  state.events.push(event);
 }
 
 function renderEvents() {
