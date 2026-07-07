@@ -58,7 +58,7 @@ const state = {
   apiBase: initialApiBase(),
   eventSource: null,
   events: [],
-  filter: "all",
+  filter: "message",
   lastServerEventId: "",
   pendingAssistant: null,
   seenEventKeys: new Set(),
@@ -335,7 +335,7 @@ function mergeSnapshotEvents(events) {
   if (!Array.isArray(events) || !events.length) return;
 
   let changed = false;
-  events.forEach((item) => {
+  [...events].sort(compareSnapshotEvents).forEach((item) => {
     const event = {
       id: item.id,
       type: item.type || item.event || "message",
@@ -357,6 +357,36 @@ function mergeSnapshotEvents(events) {
     state.events.splice(0, state.events.length - MAX_EVENTS);
   }
   renderEvents();
+}
+
+function compareSnapshotEvents(left, right) {
+  return (
+    eventSortMillis(left) - eventSortMillis(right) ||
+    eventSortPosition(left) - eventSortPosition(right) ||
+    eventSortTypeRank(left) - eventSortTypeRank(right)
+  );
+}
+
+function eventSortMillis(event) {
+  const value = event?.timestamp || event?.time || event?.createdAt || "";
+  const millis = new Date(value).getTime();
+  return Number.isFinite(millis) ? millis : 0;
+}
+
+function eventSortPosition(event) {
+  const value = event?.event?.messagePosition || event?.messagePosition || event?.event?.message_position;
+  const position = Number(value);
+  return Number.isFinite(position) ? position : Number.MAX_SAFE_INTEGER;
+}
+
+function eventSortTypeRank(event) {
+  const type = event?.type || event?.event || "";
+  if (type === "message.user") return 10;
+  if (String(type).startsWith("message.assistant")) return 20;
+  if (String(type).startsWith("message.")) return 30;
+  if (type === "task.started") return 40;
+  if (type === "task.completed" || type === "task.failed" || type === "task.interrupted") return 90;
+  return 50;
 }
 
 function markEventSeen(event) {
@@ -504,7 +534,7 @@ function renderEvents() {
 
 function filterEvent(event, filter) {
   if (filter === "all") return true;
-  if (filter === "message") return event.type.startsWith("message.");
+  if (filter === "message") return event.type.startsWith("message.") && !isStatusOnlyLarkCardForChat(event);
   if (filter === "work") return event.type.startsWith("task.") || event.type.startsWith("tool.");
   if (filter === "error") return classifyEvent(event.type, event.payload?.tone) === "error";
   return true;
@@ -534,6 +564,9 @@ function renderEvent(event) {
 }
 
 function renderEventContent(event, text, role, isCard) {
+  if (isCard && role === "assistant" && state.filter === "message") {
+    return `<div class="markdown-body">${renderMarkdown(cleanLarkCardChatText(text))}</div>`;
+  }
   if (isCard) return renderLarkCard(event, text);
   if (role === "system") {
     return `<div class="system-text">${renderMarkdown(text)}</div>`;
@@ -576,6 +609,27 @@ function stripCardEnvelope(text) {
     .trim()
     .replace(/^<card[^>]*>/i, "")
     .replace(/<\/card>$/i, "")
+    .trim();
+}
+
+function isStatusOnlyLarkCardForChat(event) {
+  const text = event.text || event.payload?.resultSummary || event.payload?.prompt || "";
+  if (!isLarkCardEvent(event, text)) return false;
+  return cleanLarkCardChatText(text)
+    .replace(/[✅❌⚠️⏹🧠🧰🔎*_`#>\-\s.。…]+/g, "")
+    .trim().length === 0;
+}
+
+function cleanLarkCardChatText(text) {
+  return stripCardEnvelope(text)
+    .replace(/\[[^\]]*(?:终止|stop)[^\]]*\]/gi, "")
+    .replace(/\bmessage\s+[a-z0-9_.:-]+/gi, "")
+    .replace(/>\s*[✅❌⚠️⏹🧠]\s*\*{0,2}command[\s\S]{0,260?}…/gi, "")
+    .split(/\r?\n/)
+    .filter((line) => !isCardStatusLine(line))
+    .join("\n")
+    .replace(/(?:正在思考|已被中断|终止|interactive message)/gi, "")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
