@@ -576,7 +576,7 @@ function isCardStatusLine(line) {
 }
 
 function renderMarkdown(value) {
-  const lines = String(value || "").replace(/\r\n/g, "\n").split("\n");
+  const lines = normalizeMarkdownSource(value).split("\n");
   const blocks = [];
   let paragraph = [];
   let list = null;
@@ -605,7 +605,8 @@ function renderMarkdown(value) {
     flushList();
   };
 
-  lines.forEach((line) => {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     const fence = line.match(/^```([\w-]*)\s*$/);
     if (code) {
       if (fence) {
@@ -618,18 +619,26 @@ function renderMarkdown(value) {
       } else {
         code.lines.push(line);
       }
-      return;
+      continue;
     }
 
     if (fence) {
       flushInlineBlocks();
       code = { lang: fence[1] || "", lines: [] };
-      return;
+      continue;
     }
 
     if (!line.trim()) {
       flushInlineBlocks();
-      return;
+      continue;
+    }
+
+    const table = readMarkdownTable(lines, index);
+    if (table) {
+      flushInlineBlocks();
+      blocks.push(renderMarkdownTable(table.rows));
+      index = table.endIndex;
+      continue;
     }
 
     const heading = line.match(/^(#{1,3})\s+(.+)$/);
@@ -637,7 +646,7 @@ function renderMarkdown(value) {
       flushInlineBlocks();
       const level = heading[1].length + 2;
       blocks.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
-      return;
+      continue;
     }
 
     const quoteMatch = line.match(/^>\s?(.*)$/);
@@ -645,7 +654,7 @@ function renderMarkdown(value) {
       flushParagraph();
       flushList();
       quote.push(quoteMatch[1]);
-      return;
+      continue;
     }
 
     const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
@@ -657,13 +666,13 @@ function renderMarkdown(value) {
       if (!list || list.ordered !== orderedList) flushList();
       if (!list) list = { ordered: orderedList, items: [] };
       list.items.push((ordered || unordered)[1]);
-      return;
+      continue;
     }
 
     flushQuote();
     flushList();
     paragraph.push(line);
-  });
+  }
 
   if (code) {
     blocks.push(
@@ -675,6 +684,114 @@ function renderMarkdown(value) {
   flushInlineBlocks();
 
   return blocks.join("") || `<p>${escapeHtml(value)}</p>`;
+}
+
+function normalizeMarkdownSource(value) {
+  const text = String(value || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/([^\n`])(```[\w-]+)/g, "$1\n$2")
+    .replace(/([^\n`])```(?![\w-])([^\n`])/g, "$1\n```\n$2")
+    .replace(/\|(\*\*[^*\n]+\*\*)\|/g, "|\n$1|")
+    .replace(/([^\n])(\|[^\n|]*\|[^\n]*\n\|[\s:|-]+\|)/g, "$1\n$2");
+
+  return text.split("\n").flatMap(splitLooseCodeFenceLine).flatMap(splitLooseMarkdownTableLine).join("\n");
+}
+
+function splitLooseCodeFenceLine(line) {
+  const match = String(line || "").match(/^```([\w-]{1,24})([^\w\s-][^\n]*)$/);
+  if (!match) return [line];
+  return [`\`\`\`${match[1]}`, match[2]];
+}
+
+function splitLooseMarkdownTableLine(line) {
+  const parts = [];
+  let rest = String(line || "");
+  const firstPipe = rest.indexOf("|");
+
+  if (firstPipe > 0 && rest.indexOf("|", firstPipe + 1) > firstPipe) {
+    const prefix = rest.slice(0, firstPipe).trimEnd();
+    if (prefix) parts.push(prefix);
+    rest = rest.slice(firstPipe);
+  }
+
+  if (rest.startsWith("|")) {
+    const lastPipe = rest.lastIndexOf("|");
+    if (lastPipe > 0 && lastPipe < rest.length - 1) {
+      const tableRow = rest.slice(0, lastPipe + 1);
+      const tail = rest.slice(lastPipe + 1).trimStart();
+      parts.push(tableRow);
+      if (tail) parts.push(tail);
+      return parts;
+    }
+  }
+
+  parts.push(rest);
+  return parts;
+}
+
+function readMarkdownTable(lines, startIndex) {
+  if (!isMarkdownTableRow(lines[startIndex]) || !isMarkdownTableDivider(lines[startIndex + 1])) return null;
+
+  const rows = [splitMarkdownTableRow(lines[startIndex]), splitMarkdownTableRow(lines[startIndex + 1])];
+  let endIndex = startIndex + 1;
+  for (let index = startIndex + 2; index < lines.length; index += 1) {
+    if (!isMarkdownTableRow(lines[index])) break;
+    rows.push(splitMarkdownTableRow(lines[index]));
+    endIndex = index;
+  }
+
+  return { rows, endIndex };
+}
+
+function isMarkdownTableRow(line) {
+  const trimmed = String(line || "").trim();
+  if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) return false;
+  return (trimmed.match(/\|/g) || []).length >= 2;
+}
+
+function isMarkdownTableDivider(line) {
+  if (!isMarkdownTableRow(line)) return false;
+  return splitMarkdownTableRow(line).every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, "")));
+}
+
+function splitMarkdownTableRow(line) {
+  return String(line || "")
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function renderMarkdownTable(rows) {
+  const header = rows[0] || [];
+  const bodyRows = rows.slice(2);
+  const columnCount = Math.max(header.length, ...bodyRows.map((row) => row.length));
+  const normalizeRow = (row) =>
+    Array.from({ length: columnCount }, (_item, index) => (row[index] === undefined ? "" : row[index]));
+
+  return `
+    <div class="markdown-table-wrap">
+      <table class="markdown-table">
+        <thead>
+          <tr>${normalizeRow(header)
+            .map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`)
+            .join("")}</tr>
+        </thead>
+        <tbody>
+          ${bodyRows
+            .map(
+              (row) => `
+                <tr>${normalizeRow(row)
+                  .map((cell) => `<td>${renderInlineMarkdown(cell)}</td>`)
+                  .join("")}</tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
 }
 
 function renderInlineMarkdown(value) {

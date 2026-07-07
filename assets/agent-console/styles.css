@@ -441,6 +441,50 @@ p {
   color: #42505e;
 }
 
+.markdown-table-wrap {
+  max-width: 100%;
+  margin: 8px 0;
+  overflow: auto;
+  border: 1px solid #d6dde3;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.markdown-table {
+  width: 100%;
+  min-width: max-content;
+  border-collapse: collapse;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.markdown-table th,
+.markdown-table td {
+  max-width: 260px;
+  border-bottom: 1px solid #e4e9ee;
+  border-right: 1px solid #e4e9ee;
+  padding: 7px 9px;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: break-word;
+}
+
+.markdown-table th:last-child,
+.markdown-table td:last-child {
+  border-right: 0;
+}
+
+.markdown-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.markdown-table th {
+  background: #f5f8fb;
+  color: #2a3845;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .markdown-body a,
 .card-markdown a,
 .system-text a {
