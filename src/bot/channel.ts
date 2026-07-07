@@ -474,6 +474,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     activeRuns,
     controls,
     executor,
+    mirrorChannel: channel,
     pool,
     workspaces,
   });

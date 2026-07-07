@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { claudeCapability, codexCapability } from '../agent/capability';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
+import type { KnownChat } from '../bot/lark-info';
 import type { ProcessPool } from '../bot/process-pool';
 import type { Controls } from '../commands';
 import { resolveAppPaths } from '../config/app-paths';
@@ -30,6 +31,7 @@ export interface AgentConsoleServerDeps {
   now?: () => number;
   skillRoots?: string[];
   historyFile?: string;
+  mirrorChannel?: AgentConsoleMirrorChannel;
 }
 
 export interface AgentConsoleServerHandle {
@@ -59,6 +61,14 @@ interface SkillSummary {
   source: string;
   description: string;
   path?: string;
+}
+
+interface AgentConsoleMirrorChannel {
+  send(
+    chatId: string,
+    content: { markdown: string } | { text: string },
+    options?: { replyTo?: string; replyInThread?: true },
+  ): Promise<{ messageId?: string }>;
 }
 
 const DEFAULT_SCOPE = 'web:default';
@@ -157,6 +167,7 @@ export async function startAgentConsoleServer(
           deps,
           publish,
           now,
+          events,
         });
         json(res, result.status, result.body, actualPort);
         return;
@@ -220,6 +231,7 @@ async function submitMessage(input: {
   deps: AgentConsoleServerDeps;
   publish: (event: Omit<ConsoleEvent, 'id' | 'timestamp'>) => ConsoleEvent;
   now: () => number;
+  events: ConsoleEvent[];
 }): Promise<{ status: number; body: object }> {
   const body = isObject(input.body) ? input.body : {};
   const text = typeof body.text === 'string' ? body.text.trim() : '';
@@ -279,6 +291,20 @@ async function submitMessage(input: {
       stage: 'agent-console',
     },
   });
+  const mirrorTarget = resolveMirrorTarget({
+    body,
+    scopeId,
+    deps: input.deps,
+    events: input.events,
+  });
+  const mirror = mirrorTarget
+    ? await mirrorUserMessage({
+        channel: input.deps.mirrorChannel,
+        chatId: mirrorTarget.chatId,
+        text,
+        publish: input.publish,
+      })
+    : undefined;
 
   input.publish({
     type: 'task.started',
@@ -290,6 +316,7 @@ async function submitMessage(input: {
     cwd: cwdRealpath,
     prompt: text,
     text,
+    ...(mirrorTarget ? { event: { mirrorChatId: mirrorTarget.chatId } } : {}),
   });
   input.publish({
     type: 'message.user',
@@ -298,6 +325,7 @@ async function submitMessage(input: {
     source: 'web',
     prompt: text,
     text,
+    ...(mirrorTarget ? { event: { mirrorChatId: mirrorTarget.chatId, mirrorMessageId: mirror?.messageId } } : {}),
   });
   void pumpRunEvents(execution.subscribe(), {
     runId: execution.runId,
@@ -305,9 +333,24 @@ async function submitMessage(input: {
     agent: input.deps.agent.id,
     profile: input.deps.controls.profile,
     publish: input.publish,
+    mirror: mirrorTarget
+      ? {
+          channel: input.deps.mirrorChannel,
+          chatId: mirrorTarget.chatId,
+          replyTo: mirror?.messageId,
+        }
+      : undefined,
   });
 
-  return { status: 202, body: { ok: true, runId: execution.runId, scope: scopeId } };
+  return {
+    status: 202,
+    body: {
+      ok: true,
+      runId: execution.runId,
+      scope: scopeId,
+      ...(mirrorTarget ? { mirrorChatId: mirrorTarget.chatId, mirrorMessageId: mirror?.messageId } : {}),
+    },
+  };
 }
 
 async function pumpRunEvents(
@@ -318,10 +361,42 @@ async function pumpRunEvents(
     agent: string;
     profile: string;
     publish: (event: Omit<ConsoleEvent, 'id' | 'timestamp'>) => ConsoleEvent;
+    mirror?: {
+      channel?: AgentConsoleMirrorChannel;
+      chatId: string;
+      replyTo?: string;
+    };
   },
 ): Promise<void> {
+  let assistantText = '';
   try {
     for await (const event of stream) {
+      if (event.type === 'text') {
+        assistantText += event.delta;
+      }
+      if (event.type === 'done' || event.type === 'error') {
+        if (assistantText.trim()) {
+          opts.publish({
+            type: 'message.assistant.final',
+            text: assistantText,
+            runId: opts.runId,
+            scope: opts.scope,
+            source: 'web',
+            agent: opts.agent,
+            profile: opts.profile,
+            event: { mirrorChatId: opts.mirror?.chatId },
+          });
+          await mirrorAssistantMessage({
+            mirror: opts.mirror,
+            text: assistantText,
+            publish: opts.publish,
+            runId: opts.runId,
+            scope: opts.scope,
+            agent: opts.agent,
+            profile: opts.profile,
+          });
+        }
+      }
       opts.publish({
         ...mapAgentEvent(event),
         runId: opts.runId,
@@ -344,6 +419,127 @@ async function pumpRunEvents(
       text: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+async function mirrorUserMessage(input: {
+  channel?: AgentConsoleMirrorChannel;
+  chatId: string;
+  text: string;
+  publish: (event: Omit<ConsoleEvent, 'id' | 'timestamp'>) => ConsoleEvent;
+}): Promise<{ messageId?: string } | undefined> {
+  if (!input.channel) return undefined;
+  try {
+    const result = await input.channel.send(input.chatId, {
+      markdown: `**Agent Console 输入**\n\n${input.text}`,
+    });
+    input.publish({
+      type: 'notification.sent',
+      source: 'web',
+      scope: input.chatId,
+      text: 'mirrored user message to Feishu',
+      event: { mirrorChatId: input.chatId, mirrorMessageId: result.messageId },
+    });
+    return result;
+  } catch (err) {
+    input.publish({
+      type: 'notification.failed',
+      source: 'web',
+      scope: input.chatId,
+      text: err instanceof Error ? err.message : String(err),
+      event: { mirrorChatId: input.chatId, stage: 'user-message' },
+    });
+    return undefined;
+  }
+}
+
+async function mirrorAssistantMessage(input: {
+  mirror?: {
+    channel?: AgentConsoleMirrorChannel;
+    chatId: string;
+    replyTo?: string;
+  };
+  text: string;
+  runId: string;
+  scope: string;
+  agent: string;
+  profile: string;
+  publish: (event: Omit<ConsoleEvent, 'id' | 'timestamp'>) => ConsoleEvent;
+}): Promise<void> {
+  if (!input.mirror?.channel) return;
+  try {
+    const result = await input.mirror.channel.send(
+      input.mirror.chatId,
+      { markdown: input.text },
+      input.mirror.replyTo ? { replyTo: input.mirror.replyTo } : undefined,
+    );
+    input.publish({
+      type: 'notification.sent',
+      text: 'mirrored assistant reply to Feishu',
+      runId: input.runId,
+      scope: input.scope,
+      source: 'web',
+      agent: input.agent,
+      profile: input.profile,
+      event: {
+        mirrorChatId: input.mirror.chatId,
+        mirrorMessageId: result.messageId,
+        replyTo: input.mirror.replyTo,
+      },
+    });
+  } catch (err) {
+    input.publish({
+      type: 'notification.failed',
+      text: err instanceof Error ? err.message : String(err),
+      runId: input.runId,
+      scope: input.scope,
+      source: 'web',
+      agent: input.agent,
+      profile: input.profile,
+      event: { mirrorChatId: input.mirror.chatId, stage: 'assistant-message' },
+    });
+  }
+}
+
+function resolveMirrorTarget(input: {
+  body: Record<string, unknown>;
+  scopeId: string;
+  deps: AgentConsoleServerDeps;
+  events: ConsoleEvent[];
+}): { chatId: string } | undefined {
+  const explicit = stringValue(input.body.chatId) ?? stringValue(input.body.mirrorChatId);
+  const chatId =
+    explicit ??
+    chatIdFromScope(input.scopeId) ??
+    lastHistoryChatId(input.events) ??
+    input.deps.controls.profileConfig.access.allowedChats[0] ??
+    knownChatId(input.deps.controls.knownChats);
+  return chatId ? { chatId } : undefined;
+}
+
+function chatIdFromScope(scopeId: string): string | undefined {
+  if (!scopeId || scopeId.startsWith('web:')) return undefined;
+  return scopeId.split(':')[0] || undefined;
+}
+
+function lastHistoryChatId(events: ConsoleEvent[]): string | undefined {
+  for (const event of [...events].reverse()) {
+    const chatId = chatIdFromUnknownEvent(event.event);
+    if (chatId) return chatId;
+  }
+  return undefined;
+}
+
+function chatIdFromUnknownEvent(event: unknown): string | undefined {
+  if (!isObject(event)) return undefined;
+  return stringValue(event.chatId) ?? stringValue(event.chat_id);
+}
+
+function knownChatId(chats: KnownChat[] | undefined): string | undefined {
+  return chats?.[0]?.id;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
 function mapAgentEvent(event: AgentEvent): { type: string; text: string } {

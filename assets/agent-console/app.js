@@ -325,6 +325,8 @@ function appendEvent(event) {
   applyRealtimeStatus(event);
   if (event.type === "message.assistant.delta") {
     mergeAssistantDelta(event);
+  } else if (event.type === "message.assistant.final") {
+    mergeAssistantFinal(event);
   } else {
     state.pendingAssistant = null;
     state.events.push(normalizeEvent(event));
@@ -436,6 +438,21 @@ function mergeAssistantDelta(event) {
   const merged = { ...event, text: nextText };
   state.events.push(merged);
   state.pendingAssistant = merged;
+}
+
+function mergeAssistantFinal(event) {
+  const last = state.events[state.events.length - 1];
+  if (last && (last.type === "message.assistant.delta" || last.type === "message.assistant.final") && last.runId === event.runId) {
+    last.type = "message.assistant.final";
+    last.text = event.text || last.text || "";
+    last.timestamp = event.timestamp;
+    last.payload = { ...last.payload, ...event.payload };
+    state.pendingAssistant = null;
+    return;
+  }
+
+  state.pendingAssistant = null;
+  state.events.push(normalizeEvent(event));
 }
 
 function renderEvents() {

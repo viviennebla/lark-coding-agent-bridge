@@ -14,6 +14,12 @@ import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js'
 
 const cleanups: Array<() => Promise<void>> = [];
 
+interface MirrorSentMessage {
+  chatId: string;
+  content: { markdown?: string; text?: string };
+  options?: { replyTo?: string; replyInThread?: true };
+}
+
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
 });
@@ -88,7 +94,38 @@ describe('Agent Console server', () => {
     );
     expect(state.status).toBe('idle');
     expect(state.events.map((event) => event.type)).toContain('message.assistant.delta');
+    expect(state.events.map((event) => event.type)).toContain('message.assistant.final');
     expect(state.events.at(-1)).toMatchObject({ type: 'task.completed', text: 'normal' });
+  });
+
+  it('mirrors web prompts and final assistant replies to the resolved Feishu chat', async () => {
+    const h = await createHarness({
+      events: [
+        { type: 'text', delta: 'pong' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      mirror: true,
+    });
+
+    const response = await postMessage(h.console, { text: 'ping', chatId: 'oc_test' });
+    expect(response.status).toBe(202);
+
+    await waitForState(h.console, (state) =>
+      state.events.some((event) => event.type === 'task.completed'),
+    );
+
+    expect(h.mirrorSent).toEqual([
+      {
+        chatId: 'oc_test',
+        content: { markdown: '**Agent Console 输入**\n\nping' },
+        options: undefined,
+      },
+      {
+        chatId: 'oc_test',
+        content: { markdown: 'pong' },
+        options: { replyTo: 'om_console_1' },
+      },
+    ]);
   });
 
   it('persists console event history and supports cursor-based sync', async () => {
@@ -157,9 +194,11 @@ async function createHarness(options: {
   events?: FakeAgentEvents;
   port?: number;
   historyFile?: string;
+  mirror?: boolean;
 } = {}): Promise<{
   agent: FakeAgentAdapter;
   console: AgentConsoleServerHandle;
+  mirrorSent: MirrorSentMessage[];
   tmp: TmpProfile;
 }> {
   const tmp = await createTmpProfile('agent-console-');
@@ -219,6 +258,20 @@ async function createHarness(options: {
     cfg,
     processId: 'proc-1',
   };
+  const mirrorSent: MirrorSentMessage[] = [];
+  let nextMirrorMessage = 1;
+  const mirrorChannel = options.mirror
+    ? {
+        async send(
+          chatId: string,
+          content: { markdown?: string; text?: string },
+          sendOptions?: { replyTo?: string; replyInThread?: true },
+        ): Promise<{ messageId: string }> {
+          mirrorSent.push({ chatId, content, options: sendOptions });
+          return { messageId: `om_console_${nextMirrorMessage++}` };
+        },
+      }
+    : undefined;
 
   const console = await startAgentConsoleServer({
     agent,
@@ -232,9 +285,10 @@ async function createHarness(options: {
     token: 'test-token',
     port: options.port ?? 0,
     historyFile: options.historyFile ?? join(tmp.root, 'agent-console-events.jsonl'),
+    mirrorChannel,
   });
   cleanups.push(console.close);
-  return { agent, console, tmp };
+  return { agent, console, mirrorSent, tmp };
 }
 
 async function postMessage(console: AgentConsoleServerHandle, body: object): Promise<Response> {
