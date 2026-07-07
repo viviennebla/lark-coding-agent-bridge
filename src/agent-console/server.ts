@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto';
+import { appendFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readdir, readFile, realpath, stat } from 'node:fs/promises';
-import { extname, join } from 'node:path';
+import { mkdir, readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { claudeCapability, codexCapability } from '../agent/capability';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { ProcessPool } from '../bot/process-pool';
 import type { Controls } from '../commands';
+import { resolveAppPaths } from '../config/app-paths';
 import { getAgentStopGraceMs } from '../config/schema';
 import { log } from '../core/logger';
 import { evaluateRunPolicy } from '../policy/run-policy';
@@ -27,6 +29,7 @@ export interface AgentConsoleServerDeps {
   token?: string;
   now?: () => number;
   skillRoots?: string[];
+  historyFile?: string;
 }
 
 export interface AgentConsoleServerHandle {
@@ -73,11 +76,18 @@ export async function startAgentConsoleServer(
     deps.staticDir ??
     process.env.LARK_CHANNEL_CONSOLE_STATIC_DIR ??
     fileURLToPath(new URL('../assets/agent-console', import.meta.url));
+  const historyFile = resolveHistoryFile(deps);
   const token = deps.token ?? process.env.LARK_CHANNEL_LOCAL_API_TOKEN ?? randomUUID();
   const now = deps.now ?? Date.now;
-  const events: ConsoleEvent[] = [];
+  const events: ConsoleEvent[] = await loadHistory(historyFile, MAX_EVENTS);
   const clients = new Set<ServerResponse>();
   let nextEventSeq = 0;
+  await mkdir(dirname(historyFile), { recursive: true }).catch((err) =>
+    log.warn('agent-console', 'history-dir-create-failed', {
+      path: historyFile,
+      err: err instanceof Error ? err.message : String(err),
+    }),
+  );
 
   const publish = (event: Omit<ConsoleEvent, 'id' | 'timestamp'>): ConsoleEvent => {
     const full: ConsoleEvent = {
@@ -87,6 +97,7 @@ export async function startAgentConsoleServer(
     };
     events.push(full);
     if (events.length > MAX_EVENTS) events.splice(0, events.length - MAX_EVENTS);
+    appendHistory(historyFile, full);
     const frame = sseFrame(full);
     for (const client of clients) client.write(frame);
     return full;
@@ -108,15 +119,24 @@ export async function startAgentConsoleServer(
       }
 
       if (req.method === 'GET' && url.pathname === '/api/state') {
-        json(res, 200, buildState(deps, events, host, actualPort, token), actualPort);
+        json(res, 200, buildState(deps, events, host, actualPort, token, historyFile), actualPort);
         return;
       }
 
       if (req.method === 'GET' && url.pathname === '/api/events') {
         writeSse(res, actualPort);
         clients.add(res);
-        for (const event of events) res.write(sseFrame(event));
+        for (const event of eventsSince(events, eventCursor(req, url))) res.write(sseFrame(event));
         req.on('close', () => clients.delete(res));
+        return;
+      }
+
+      if (req.method === 'GET' && url.pathname === '/api/history') {
+        const limit = clamp(Number(url.searchParams.get('limit') ?? MAX_EVENTS), 1, MAX_EVENTS);
+        json(res, 200, {
+          events: eventsSince(events, eventCursor(req, url)).slice(-limit),
+          maxEvents: MAX_EVENTS,
+        }, actualPort);
         return;
       }
 
@@ -359,6 +379,7 @@ function buildState(
   host: string,
   port: number,
   token: string,
+  historyFile: string,
 ): object {
   return {
     status: deps.activeRuns.snapshot().length > 0 ? 'running' : 'idle',
@@ -376,6 +397,12 @@ function buildState(
       profile: deps.controls.profile,
       messageReply: deps.controls.cfg.preferences?.messageReply,
       appId: deps.controls.cfg.accounts.app.id,
+    },
+    history: {
+      file: historyFile,
+      maxEvents: MAX_EVENTS,
+      eventCount: events.length,
+      lastEventId: events.at(-1)?.id ?? null,
     },
     events,
   };
@@ -456,7 +483,10 @@ function isRequestAllowed(
     return true;
   }
   if (req.method === 'OPTIONS') return true;
-  if (req.method === 'GET' && (url.pathname === '/api/skills' || url.pathname === '/api/events')) {
+  if (
+    req.method === 'GET' &&
+    (url.pathname === '/api/skills' || url.pathname === '/api/events' || url.pathname === '/api/history')
+  ) {
     return req.headers['x-agent-console-token'] === token || url.searchParams.get('token') === token;
   }
   if (req.method === 'POST') {
@@ -536,6 +566,67 @@ function writeSse(res: ServerResponse, port: number): void {
 
 function sseFrame(event: ConsoleEvent): string {
   return `event: ${event.type}\nid: ${event.id}\ndata: ${JSON.stringify(event)}\n\n`;
+}
+
+function resolveHistoryFile(deps: AgentConsoleServerDeps): string {
+  return (
+    deps.historyFile ??
+    process.env.LARK_CHANNEL_CONSOLE_HISTORY_FILE ??
+    join(resolveAppPaths({ profile: deps.controls.profile }).profileDir, 'agent-console-events.jsonl')
+  );
+}
+
+async function loadHistory(path: string, limit: number): Promise<ConsoleEvent[]> {
+  try {
+    const text = await readFile(path, 'utf8');
+    const events = text
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as ConsoleEvent)
+      .filter(isConsoleEvent);
+    return events.slice(-limit);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      log.warn('agent-console', 'history-load-failed', {
+        path,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return [];
+  }
+}
+
+function appendHistory(path: string, event: ConsoleEvent): void {
+  try {
+    appendFileSync(path, `${JSON.stringify(event)}\n`, 'utf8');
+  } catch (err) {
+    log.warn('agent-console', 'history-append-failed', {
+      path,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+function eventsSince(events: ConsoleEvent[], after: string | undefined): ConsoleEvent[] {
+  if (!after) return events;
+  const index = events.findIndex((event) => event.id === after);
+  return index >= 0 ? events.slice(index + 1) : events;
+}
+
+function eventCursor(req: IncomingMessage, url: URL): string | undefined {
+  const header = req.headers['last-event-id'];
+  return url.searchParams.get('after') ?? (Array.isArray(header) ? header[0] : header) ?? undefined;
+}
+
+function isConsoleEvent(value: unknown): value is ConsoleEvent {
+  if (!isObject(value)) return false;
+  return typeof value.id === 'string' && typeof value.timestamp === 'string' && typeof value.type === 'string';
+}
+
+function clamp(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return max;
+  return Math.max(min, Math.min(max, Math.trunc(value)));
 }
 
 function isLoopbackHost(host: string): boolean {

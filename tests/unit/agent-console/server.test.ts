@@ -91,6 +91,49 @@ describe('Agent Console server', () => {
     expect(state.events.at(-1)).toMatchObject({ type: 'task.completed', text: 'normal' });
   });
 
+  it('persists console event history and supports cursor-based sync', async () => {
+    const historyTmp = await createTmpProfile('agent-console-history-');
+    cleanups.push(historyTmp.cleanup);
+    const historyFile = join(historyTmp.root, 'agent-console-events.jsonl');
+    const first = await createHarness({ historyFile });
+
+    const response = await postMessage(first.console, { text: '/interrupt' });
+    expect(response.status).toBe(202);
+
+    const firstState = await getState(first.console);
+    const lastEvent = firstState.events.at(-1);
+    expect(lastEvent).toMatchObject({
+      type: 'system.notice',
+      text: 'no active run for scope',
+    });
+    expect(lastEvent?.id).toBeTruthy();
+
+    const historyResponse = await fetch(`${first.console.baseUrl}/api/history?token=test-token&limit=1`);
+    expect(historyResponse.status).toBe(200);
+    const history = await historyResponse.json() as { events: Array<{ id: string; type: string }> };
+    expect(history.events).toEqual([
+      expect.objectContaining({
+        id: lastEvent?.id,
+        type: 'system.notice',
+      }),
+    ]);
+
+    const second = await createHarness({ historyFile });
+    const secondState = await getState(second.console);
+    expect(secondState.events.at(-1)).toMatchObject({
+      id: lastEvent?.id,
+      type: 'system.notice',
+      text: 'no active run for scope',
+    });
+
+    const afterResponse = await fetch(
+      `${second.console.baseUrl}/api/history?token=test-token&after=${encodeURIComponent(lastEvent?.id ?? '')}`,
+    );
+    expect(afterResponse.status).toBe(200);
+    const after = await afterResponse.json() as { events: Array<unknown> };
+    expect(after.events).toEqual([]);
+  });
+
   it('does not throw when the requested port is already occupied', async () => {
     const blocker = createServer((_, res) => {
       res.writeHead(200, { 'content-type': 'text/plain' });
@@ -113,6 +156,7 @@ describe('Agent Console server', () => {
 async function createHarness(options: {
   events?: FakeAgentEvents;
   port?: number;
+  historyFile?: string;
 } = {}): Promise<{
   agent: FakeAgentAdapter;
   console: AgentConsoleServerHandle;
@@ -187,6 +231,7 @@ async function createHarness(options: {
     skillRoots: [skillRoot],
     token: 'test-token',
     port: options.port ?? 0,
+    historyFile: options.historyFile ?? join(tmp.root, 'agent-console-events.jsonl'),
   });
   cleanups.push(console.close);
   return { agent, console, tmp };
@@ -205,20 +250,20 @@ async function postMessage(console: AgentConsoleServerHandle, body: object): Pro
 
 async function getState(console: AgentConsoleServerHandle): Promise<{
   status: string;
-  events: Array<{ type: string; text?: string }>;
+  events: Array<{ id?: string; type: string; text?: string }>;
 }> {
   const response = await fetch(`${console.baseUrl}/api/state`);
   expect(response.status).toBe(200);
   return response.json() as Promise<{
     status: string;
-    events: Array<{ type: string; text?: string }>;
+    events: Array<{ id?: string; type: string; text?: string }>;
   }>;
 }
 
 async function waitForState(
   console: AgentConsoleServerHandle,
-  predicate: (state: { events: Array<{ type: string; text?: string }> }) => boolean,
-): Promise<{ status: string; events: Array<{ type: string; text?: string }> }> {
+  predicate: (state: { events: Array<{ id?: string; type: string; text?: string }> }) => boolean,
+): Promise<{ status: string; events: Array<{ id?: string; type: string; text?: string }> }> {
   for (let i = 0; i < 20; i++) {
     const state = await getState(console);
     if (predicate(state)) return state;

@@ -57,6 +57,7 @@ const state = {
   eventSource: null,
   events: [],
   filter: "all",
+  lastServerEventId: "",
   pendingAssistant: null,
   seenEventKeys: new Set(),
   selectedSkill: null,
@@ -245,7 +246,10 @@ function connectEvents() {
     state.eventSource.close();
   }
 
-  const source = new EventSource(apiUrl("/api/events", state.token ? { token: state.token } : undefined));
+  const eventQuery = {};
+  if (state.token) eventQuery.token = state.token;
+  if (state.lastServerEventId) eventQuery.after = state.lastServerEventId;
+  const source = new EventSource(apiUrl("/api/events", eventQuery));
   state.eventSource = source;
   setConnectionStatus("已连接", "ok");
 
@@ -290,6 +294,8 @@ function parseEventData(value) {
       type: parsed.type || parsed.event || "message",
       text: parsed.text || parsed.message || parsed.content || parsed.delta || parsed.summary || "",
       timestamp: parsed.timestamp || parsed.time || parsed.createdAt || new Date().toISOString(),
+      runId: parsed.runId,
+      scope: parsed.scope,
       payload: parsed,
     };
   } catch {
@@ -313,6 +319,7 @@ function appendLocalEvent(type, text, tone = "info") {
 
 function appendEvent(event) {
   if (!markEventSeen(event)) return;
+  rememberServerEvent(event);
   applyRealtimeStatus(event);
   if (event.type === "message.assistant.delta") {
     mergeAssistantDelta(event);
@@ -337,10 +344,13 @@ function mergeSnapshotEvents(events) {
       type: item.type || item.event || "message",
       text: item.text || item.message || item.content || item.delta || item.summary || "",
       timestamp: item.timestamp || item.time || item.createdAt || new Date().toISOString(),
+      runId: item.runId,
+      scope: item.scope,
       payload: item,
     };
 
     if (!markEventSeen(event)) return;
+    rememberServerEvent(event);
     state.pendingAssistant = null;
     state.events.push(normalizeEvent(event));
     changed = true;
@@ -358,6 +368,11 @@ function markEventSeen(event) {
   if (state.seenEventKeys.has(key)) return false;
   state.seenEventKeys.add(key);
   return true;
+}
+
+function rememberServerEvent(event) {
+  const id = event.id || event.payload?.id;
+  if (id) state.lastServerEventId = id;
 }
 
 function eventKey(event) {
@@ -504,7 +519,6 @@ async function sendMessage(event) {
   if (!text) return;
 
   els.sendButton.disabled = true;
-  appendLocalEvent("message.user", text);
 
   try {
     await requestJson("/api/message", {
@@ -617,6 +631,8 @@ async function reconnect() {
   els.apiBaseInput.value = state.apiBase;
   localStorage.setItem("agentConsole.apiBase", state.apiBase);
   state.events = [];
+  state.seenEventKeys.clear();
+  state.lastServerEventId = "";
   state.pendingAssistant = null;
   renderEvents();
   appendLocalEvent("system.notice", `连接到 ${state.apiBase}`);
