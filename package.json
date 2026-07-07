@@ -27,6 +27,7 @@
   },
   "files": [
     "dist",
+    "assets",
     "bin",
     "README.md",
     "README.zh.md",

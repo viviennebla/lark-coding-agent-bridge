@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent Console</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="top-bar" aria-label="Agent Console 状态">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">AC</div>
+          <div class="brand-copy">
+            <h1>Agent Console</h1>
+            <p id="workspaceLabel">正在读取工作区</p>
+          </div>
+        </div>
+
+        <div class="status-strip">
+          <div class="status-pill">
+            <span>连接</span>
+            <strong id="connectionStatus">未连接</strong>
+          </div>
+          <div class="status-pill">
+            <span>任务</span>
+            <strong id="taskStatus">unknown</strong>
+          </div>
+          <div class="status-pill wide">
+            <span>Thread</span>
+            <strong id="threadId">-</strong>
+          </div>
+          <div class="status-pill">
+            <span>Profile</span>
+            <strong id="profileLabel">-</strong>
+          </div>
+        </div>
+      </header>
+
+      <main class="workspace-grid">
+        <section class="console-pane" aria-label="消息和运行事件">
+          <div class="pane-head">
+            <div>
+              <h2>运行流</h2>
+              <p id="lastEventLabel">等待事件</p>
+            </div>
+            <div class="head-actions">
+              <div class="segmented" role="group" aria-label="事件筛选">
+                <button type="button" data-filter="all" aria-pressed="true">全部</button>
+                <button type="button" data-filter="message" aria-pressed="false">消息</button>
+                <button type="button" data-filter="work" aria-pressed="false">任务</button>
+                <button type="button" data-filter="error" aria-pressed="false">异常</button>
+              </div>
+              <button id="refreshButton" class="icon-button" type="button" title="刷新状态" aria-label="刷新状态">↻</button>
+            </div>
+          </div>
+
+          <div id="eventStream" class="event-stream" role="log" aria-live="polite"></div>
+
+          <form id="messageForm" class="composer">
+            <div class="composer-meta">
+              <div id="selectedSkillLabel" class="selected-skill">未选择 skill</div>
+              <div class="quick-actions" aria-label="快捷命令">
+                <button type="button" data-command="/status">/status</button>
+                <button type="button" data-command="/continue">/continue</button>
+                <button type="button" data-command="/interrupt">/interrupt</button>
+              </div>
+            </div>
+            <div id="commandHint" class="command-hint" hidden></div>
+            <label class="sr-only" for="messageInput">输入任务或命令</label>
+            <textarea
+              id="messageInput"
+              rows="5"
+              placeholder="输入任务，或用 /interrupt 打断当前运行。Ctrl+Enter 发送。"
+              autocomplete="off"
+              spellcheck="false"
+            ></textarea>
+            <div class="composer-footer">
+              <button id="clearSkillButton" class="ghost-button" type="button" disabled>清除 skill</button>
+              <button id="sendButton" class="primary-button" type="submit">发送</button>
+            </div>
+          </form>
+        </section>
+
+        <aside class="side-pane" aria-label="Skills 和连接设置">
+          <section class="tool-pane skills-pane">
+            <div class="pane-head compact">
+              <div>
+                <h2>Skills</h2>
+                <p id="skillCount">0 loaded</p>
+              </div>
+              <button id="reloadSkillsButton" class="icon-button" type="button" title="重载 skills" aria-label="重载 skills">↻</button>
+            </div>
+            <label class="sr-only" for="skillSearch">搜索 skill</label>
+            <input id="skillSearch" class="search-input" type="search" placeholder="搜索 skill，例如 doc / review / fix" />
+            <div id="skillList" class="skill-list" role="listbox" aria-label="Skill 列表"></div>
+          </section>
+
+          <section class="tool-pane settings-pane">
+            <div class="pane-head compact">
+              <div>
+                <h2>连接</h2>
+                <p>本地 Agent Console</p>
+              </div>
+            </div>
+            <label class="field-label" for="apiBaseInput">后端地址</label>
+            <div class="api-row">
+              <input id="apiBaseInput" class="search-input" type="url" value="http://127.0.0.1:1313" />
+              <button id="connectButton" class="ghost-button" type="button">连接</button>
+            </div>
+            <dl id="settingsSummary" class="settings-list"></dl>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>

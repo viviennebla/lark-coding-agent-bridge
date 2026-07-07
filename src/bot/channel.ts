@@ -67,6 +67,10 @@ import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
 import {
+  startAgentConsoleServer,
+  type AgentConsoleServerHandle,
+} from '../agent-console/server';
+import {
   consumeCotEvents,
   CotClient,
   CotPublisher,
@@ -269,6 +273,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
 
   const channel = createLarkChannel(opts);
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
+  let agentConsole: AgentConsoleServerHandle | undefined;
 
   // Pending → run handoff: while a run is active on a chat, block its pending
   // queue so messages keep accumulating without flushing. When the run ends,
@@ -464,6 +469,15 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     forceReconnect: () => controls.restart(),
   });
 
+  agentConsole = await startAgentConsoleServer({
+    agent,
+    activeRuns,
+    controls,
+    executor,
+    pool,
+    workspaces,
+  });
+
   return {
     channel,
     disconnect: async () => {
@@ -472,7 +486,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       knownChatsRefresh.stop();
       keepalive.stop();
       pending.cancelAll();
-      const [disconnectResult, stopAllResult, ...flushResults] = await Promise.allSettled([
+      const [consoleResult, disconnectResult, stopAllResult, ...flushResults] = await Promise.allSettled([
+        agentConsole?.close(),
         channel.disconnect(),
         activeRuns.stopAll(),
         sessions.flush(),
@@ -482,6 +497,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       ]);
       if (stopAllResult.status === 'rejected') {
         log.fail('disconnect', stopAllResult.reason, { step: 'stopAll' });
+      }
+      if (consoleResult.status === 'rejected') {
+        log.fail('disconnect', consoleResult.reason, { step: 'agentConsole' });
       }
       for (const [idx, result] of flushResults.entries()) {
         if (result.status === 'rejected') {
