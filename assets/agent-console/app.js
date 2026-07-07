@@ -3,6 +3,8 @@ const DEFAULT_API_BASE =
     ? window.location.origin
     : "http://127.0.0.1:1313";
 const MAX_EVENTS = 240;
+const COMPOSER_MIN_HEIGHT = 44;
+const COMPOSER_MAX_HEIGHT = 156;
 const PRIORITY_SKILLS = [
   "orchestrator-agent",
   "coding-agent",
@@ -467,16 +469,233 @@ function renderEvent(event) {
       ? "assistant"
       : "system";
   const text = event.text || event.payload?.resultSummary || event.payload?.prompt || JSON.stringify(event.payload);
+  const isCard = isLarkCardEvent(event, text);
 
   return `
-    <article class="event-item ${role}" data-tone="${escapeAttr(tone)}">
+    <article class="event-item ${role}${isCard ? " card-backed" : ""}" data-tone="${escapeAttr(tone)}">
       <div class="event-meta">
         <span>${escapeHtml(eventTitle(event.type))}</span>
         <time>${escapeHtml(formatTime(event.timestamp))}</time>
       </div>
-      <pre>${escapeHtml(text)}</pre>
+      <div class="event-body">
+        ${renderEventContent(event, text, role, isCard)}
+      </div>
     </article>
   `;
+}
+
+function renderEventContent(event, text, role, isCard) {
+  if (isCard) return renderLarkCard(event, text);
+  if (role === "system") {
+    return `<div class="system-text">${renderMarkdown(text)}</div>`;
+  }
+  return `<div class="markdown-body">${renderMarkdown(text)}</div>`;
+}
+
+function isLarkCardEvent(event, text) {
+  const messageType =
+    event.payload?.event?.messageType ||
+    event.payload?.messageType ||
+    event.payload?.message?.messageType ||
+    event.payload?.message?.message_type;
+  if (String(messageType || "").toLowerCase() === "interactive") return true;
+
+  const content = String(text || "").trim();
+  if (/^<card[\s>]/i.test(content) || /<\/card>$/i.test(content)) return true;
+  return /command_\*{0,4}execution|正在调用工具|正在思考|已被中断|终止/.test(content);
+}
+
+function renderLarkCard(event, text) {
+  const cleaned = stripCardEnvelope(text);
+  const messageId = event.payload?.event?.messageId || event.payload?.messageId || "";
+  const footer = messageId ? `<div class="card-foot">message ${escapeHtml(shortId(messageId))}</div>` : "";
+
+  return `
+    <section class="lark-card-message">
+      <div class="card-head">
+        <span class="card-label">飞书卡片</span>
+        <span>${escapeHtml(cardSummary(cleaned))}</span>
+      </div>
+      <div class="card-content">${renderCardMarkdown(cleaned)}</div>
+      ${footer}
+    </section>
+  `;
+}
+
+function stripCardEnvelope(text) {
+  return String(text || "")
+    .trim()
+    .replace(/^<card[^>]*>/i, "")
+    .replace(/<\/card>$/i, "")
+    .trim();
+}
+
+function cardSummary(text) {
+  const firstUsefulLine = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^>\s*/, "").replace(/[*_`#]/g, "").trim())
+    .find(Boolean);
+  if (!firstUsefulLine) return "interactive message";
+  return firstUsefulLine.length > 42 ? `${firstUsefulLine.slice(0, 42)}...` : firstUsefulLine;
+}
+
+function shortId(value) {
+  const text = String(value);
+  return text.length > 14 ? `${text.slice(0, 6)}...${text.slice(-6)}` : text;
+}
+
+function renderCardMarkdown(text) {
+  const normalized = String(text || "").replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  const chunks = [];
+  let buffered = [];
+
+  const flushBuffer = () => {
+    if (!buffered.length) return;
+    chunks.push(`<div class="card-markdown">${renderMarkdown(buffered.join("\n"))}</div>`);
+    buffered = [];
+  };
+
+  lines.forEach((line) => {
+    if (isCardStatusLine(line)) {
+      flushBuffer();
+      chunks.push(`<div class="card-status-line">${renderInlineMarkdown(line.replace(/^>\s*/, "").trim())}</div>`);
+      return;
+    }
+    buffered.push(line);
+  });
+
+  flushBuffer();
+  return chunks.join("");
+}
+
+function isCardStatusLine(line) {
+  return /^(>\s*)?[*\s]*(✅|⏹|🧠|🧰|🔎|⚠️)|command_\*{0,4}execution|正在调用工具|正在思考|已被中断|终止/.test(
+    line.trim(),
+  );
+}
+
+function renderMarkdown(value) {
+  const lines = String(value || "").replace(/\r\n/g, "\n").split("\n");
+  const blocks = [];
+  let paragraph = [];
+  let list = null;
+  let quote = [];
+  let code = null;
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    blocks.push(`<p>${paragraph.map(renderInlineMarkdown).join("<br>")}</p>`);
+    paragraph = [];
+  };
+  const flushQuote = () => {
+    if (!quote.length) return;
+    blocks.push(`<blockquote>${renderMarkdown(quote.join("\n"))}</blockquote>`);
+    quote = [];
+  };
+  const flushList = () => {
+    if (!list) return;
+    const tag = list.ordered ? "ol" : "ul";
+    blocks.push(`<${tag}>${list.items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</${tag}>`);
+    list = null;
+  };
+  const flushInlineBlocks = () => {
+    flushParagraph();
+    flushQuote();
+    flushList();
+  };
+
+  lines.forEach((line) => {
+    const fence = line.match(/^```([\w-]*)\s*$/);
+    if (code) {
+      if (fence) {
+        blocks.push(
+          `<pre class="code-block"><code${code.lang ? ` data-lang="${escapeAttr(code.lang)}"` : ""}>${escapeHtml(
+            code.lines.join("\n"),
+          )}</code></pre>`,
+        );
+        code = null;
+      } else {
+        code.lines.push(line);
+      }
+      return;
+    }
+
+    if (fence) {
+      flushInlineBlocks();
+      code = { lang: fence[1] || "", lines: [] };
+      return;
+    }
+
+    if (!line.trim()) {
+      flushInlineBlocks();
+      return;
+    }
+
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      flushInlineBlocks();
+      const level = heading[1].length + 2;
+      blocks.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      return;
+    }
+
+    const quoteMatch = line.match(/^>\s?(.*)$/);
+    if (quoteMatch) {
+      flushParagraph();
+      flushList();
+      quote.push(quoteMatch[1]);
+      return;
+    }
+
+    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
+    const ordered = line.match(/^\s*\d+\.\s+(.+)$/);
+    if (unordered || ordered) {
+      flushParagraph();
+      flushQuote();
+      const orderedList = Boolean(ordered);
+      if (!list || list.ordered !== orderedList) flushList();
+      if (!list) list = { ordered: orderedList, items: [] };
+      list.items.push((ordered || unordered)[1]);
+      return;
+    }
+
+    flushQuote();
+    flushList();
+    paragraph.push(line);
+  });
+
+  if (code) {
+    blocks.push(
+      `<pre class="code-block"><code${code.lang ? ` data-lang="${escapeAttr(code.lang)}"` : ""}>${escapeHtml(
+        code.lines.join("\n"),
+      )}</code></pre>`,
+    );
+  }
+  flushInlineBlocks();
+
+  return blocks.join("") || `<p>${escapeHtml(value)}</p>`;
+}
+
+function renderInlineMarkdown(value) {
+  const tokens = [];
+  const stash = (html) => {
+    tokens.push(html);
+    return `\u0000${tokens.length - 1}\u0000`;
+  };
+
+  let text = String(value || "");
+  text = text.replace(/`([^`\n]+)`/g, (_match, code) => stash(`<code>${escapeHtml(code)}</code>`));
+  text = text.replace(/\[([^\]\n]{1,200})\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)/gi, (_match, label, url) =>
+    stash(`<a href="${escapeAttr(url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`),
+  );
+
+  let html = escapeHtml(text);
+  html = html.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/(^|[^\*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  html = html.replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
+  html = html.replace(/(^|[^_])_([^_\n]+)_/g, "$1<em>$2</em>");
+  return html.replace(/\u0000(\d+)\u0000/g, (_match, index) => tokens[Number(index)] || "");
 }
 
 function eventTitle(type) {
@@ -530,6 +749,7 @@ async function sendMessage(event) {
       }),
     });
     els.messageInput.value = "";
+    resizeMessageInput();
     updateCommandHint();
     await loadState().catch(() => null);
   } catch (error) {
@@ -584,11 +804,23 @@ function updateCommandHint() {
     : `<div class="command-empty">未知命令，会按普通消息发送</div>`;
 }
 
+function handleMessageInput() {
+  resizeMessageInput();
+  updateCommandHint();
+}
+
+function resizeMessageInput() {
+  els.messageInput.style.height = "auto";
+  const nextHeight = Math.min(Math.max(els.messageInput.scrollHeight, COMPOSER_MIN_HEIGHT), COMPOSER_MAX_HEIGHT);
+  els.messageInput.style.height = `${nextHeight}px`;
+  els.messageInput.style.overflowY = els.messageInput.scrollHeight > COMPOSER_MAX_HEIGHT ? "auto" : "hidden";
+}
+
 function applyCommandTemplate(command) {
   els.messageInput.value = `${command} `;
   els.messageInput.focus();
   els.messageInput.setSelectionRange(els.messageInput.value.length, els.messageInput.value.length);
-  updateCommandHint();
+  handleMessageInput();
 }
 
 function setFilter(filter) {
@@ -647,7 +879,7 @@ function bindEvents() {
   els.refreshButton.addEventListener("click", () => Promise.allSettled([loadState(), loadSkills()]));
   els.reloadSkillsButton.addEventListener("click", loadSkills);
   els.clearSkillButton.addEventListener("click", clearSelectedSkill);
-  els.messageInput.addEventListener("input", updateCommandHint);
+  els.messageInput.addEventListener("input", handleMessageInput);
   els.skillSearch.addEventListener("input", debounce(loadSkills, 220));
 
   els.messageInput.addEventListener("keydown", (event) => {
@@ -679,6 +911,7 @@ function bindEvents() {
 function init() {
   els.apiBaseInput.value = state.apiBase;
   bindEvents();
+  resizeMessageInput();
   renderEvents();
   reconnect();
 }

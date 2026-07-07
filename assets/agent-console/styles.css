@@ -318,11 +318,11 @@ p {
 }
 
 .event-item {
-  max-width: 86%;
+  max-width: min(760px, 86%);
   border: 1px solid var(--line);
   border-left-width: 4px;
   border-radius: 8px;
-  padding: 9px 10px;
+  padding: 8px 10px 9px;
   margin-bottom: 9px;
   background: #fff;
 }
@@ -330,8 +330,8 @@ p {
 .event-item.user {
   margin-left: auto;
   border-left-width: 1px;
-  border-right: 4px solid var(--accent);
-  background: #f0f7f8;
+  border-right: 4px solid #3d7d6b;
+  background: #eaf5ef;
 }
 
 .event-item.assistant {
@@ -374,13 +374,168 @@ p {
   white-space: nowrap;
 }
 
-.event-item pre {
-  margin: 7px 0 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+.event-body {
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+
+.markdown-body,
+.system-text,
+.card-markdown {
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.55;
+}
+
+.markdown-body > :first-child,
+.system-text > :first-child,
+.card-markdown > :first-child {
+  margin-top: 0;
+}
+
+.markdown-body > :last-child,
+.system-text > :last-child,
+.card-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body p,
+.system-text p,
+.card-markdown p {
+  margin: 0 0 8px;
+}
+
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.card-markdown h3,
+.card-markdown h4,
+.card-markdown h5 {
+  margin: 10px 0 6px;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.markdown-body ul,
+.markdown-body ol,
+.card-markdown ul,
+.card-markdown ol,
+.system-text ul,
+.system-text ol {
+  margin: 6px 0 8px;
+  padding-left: 20px;
+}
+
+.markdown-body li,
+.card-markdown li,
+.system-text li {
+  margin: 2px 0;
+}
+
+.markdown-body blockquote,
+.card-markdown blockquote,
+.system-text blockquote {
+  margin: 8px 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--line-strong);
+  background: #f5f7f8;
+  color: #42505e;
+}
+
+.markdown-body a,
+.card-markdown a,
+.system-text a {
+  color: var(--accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.markdown-body code,
+.card-markdown code,
+.system-text code,
+.card-status-line code {
+  border: 1px solid #d6dde3;
+  border-radius: 4px;
+  background: #f3f5f7;
+  padding: 1px 4px;
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.code-block {
+  margin: 8px 0;
+  overflow: auto;
+  border: 1px solid #d3dbe2;
+  border-radius: 6px;
+  background: #111820;
+  color: #edf3f7;
+}
+
+.code-block code {
+  display: block;
+  min-width: max-content;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 10px;
+  white-space: pre;
+}
+
+.lark-card-message {
+  border: 1px solid #d8e1e8;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #e6ebef;
+  background: #f5f8fb;
+  color: #42505e;
+  font-size: 12px;
+}
+
+.card-head span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-label {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #dcebe8;
+  color: #245b52;
+  padding: 2px 7px;
+  font-weight: 700;
+}
+
+.card-content {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.card-status-line {
+  border: 1px solid #dbe4ea;
+  border-radius: 6px;
+  background: #f8fafb;
+  padding: 7px 8px;
+  color: #324250;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.card-foot {
+  padding: 6px 10px 8px;
+  color: var(--muted);
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
 }
 
 .composer {
@@ -444,9 +599,10 @@ p {
 }
 
 .composer textarea {
-  min-height: 116px;
-  resize: vertical;
-  padding: 10px;
+  min-height: 44px;
+  max-height: 156px;
+  resize: none;
+  padding: 10px 11px;
   line-height: 1.45;
 }
 
