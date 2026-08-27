@@ -60,7 +60,7 @@ async function ensureManagedDefaultWorkspace(path: string): Promise<string> {
 }
 
 export async function createBootstrapCodexConfig(binaryPath: string | undefined) {
-  const command = binaryPath ?? process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex';
+  const command = process.env.LARK_CHANNEL_MANAGED_CODEX_BIN ?? binaryPath ?? process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex';
   let resolvedBinary: string;
   try {
     resolvedBinary = await resolveExecutablePath(command);

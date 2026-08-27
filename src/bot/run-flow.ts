@@ -25,6 +25,7 @@ export interface StartRunFlowInput {
   scopeId: string;
   scope: ScopeContext;
   prompt: string;
+  messageId?: string;
   attachments: AgentAttachment[];
   access: AccessDecision;
   capability: AgentCapability;
@@ -155,6 +156,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
               .map((attachment) => attachment.path)
               .filter((path): path is string => Boolean(path))
           : undefined,
+      messageId: input.messageId,
       stopGraceMs: input.stopGraceMs,
       observability: input.observability,
     });

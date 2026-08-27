@@ -88,7 +88,7 @@ export function createRuntimeProfileConfig(
   return createDefaultProfileConfig({
     ...input,
     ...(input.agentKind === 'codex'
-      ? { codex: input.codex ?? { binaryPath: process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex' } }
+      ? { codex: input.codex ?? { binaryPath: process.env.LARK_CHANNEL_MANAGED_CODEX_BIN ?? process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex' } }
       : {}),
   });
 }

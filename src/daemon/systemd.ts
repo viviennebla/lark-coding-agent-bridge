@@ -62,7 +62,7 @@ WantedBy=default.target
 }
 
 export async function writeUnit(profile: string): Promise<void> {
-  const bridgeEntryPath = process.argv[1];
+  const bridgeEntryPath = process.env.LARK_CHANNEL_BRIDGE_ENTRY ?? process.argv[1];
   if (!bridgeEntryPath) {
     throw new Error('cannot determine bridge entry path (process.argv[1] is empty)');
   }

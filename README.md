@@ -1,5 +1,9 @@
 # lark-channel-bridge
 
+## Managed compatibility-bundle updates (MVP)
+
+`update check/status/apply/rollback` manages an exact, npm-integrity-verified Bridge + Codex + lark-cli bundle under `~/.lark-channel/runtime`. Apply requires `--manifest <local-path|https-url>` and refuses while the managed service is running. It never writes profile data, `CODEX_HOME`, credentials, sessions, workspaces, or secrets. After health checks it atomically switches `current.json`, writes a stable managed launcher, and re-registers an already-installed stopped service without starting it. Automatic drain, signatures, and unattended updates are intentionally not enabled.
+
 A lightweight bot that bridges Feishu / Lark messenger with your local Claude Code or Codex CLI. Run one command, scan a QR code to bind a PersonalAgent app, and talk to your local coding agent from chat.
 
 [中文 README](./README.zh.md)

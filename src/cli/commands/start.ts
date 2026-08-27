@@ -4,6 +4,8 @@ import { createInterface } from 'node:readline';
 import pkg from '../../../package.json';
 import { ClaudeAdapter } from '../../agent/claude/adapter';
 import { CodexAdapter } from '../../agent/codex/adapter';
+import { CodexAppServerSupervisor } from '../../agent/codex/app-server/supervisor';
+import { CodexRuntimeCoordinator } from '../../runtime/codex-runtime-coordinator';
 import {
   AgentPreflightError,
   formatAgentPreflightDiagnostic,
@@ -141,6 +143,26 @@ export async function runStart(opts: StartOptions): Promise<void> {
           await sessions.load();
           const sessionCatalog = new SessionCatalog(`${appPaths.sessionsFile}.catalog.json`);
           await sessionCatalog.load();
+          let codexSupervisor: CodexAppServerSupervisor | undefined;
+          let codexRuntime: CodexRuntimeCoordinator | undefined;
+          if (profileConfig.agentKind === 'codex' && profileConfig.codex?.binaryPath) {
+            codexSupervisor = new CodexAppServerSupervisor({
+              binary: process.env.LARK_CHANNEL_MANAGED_CODEX_BIN ?? profileConfig.codex.binaryPath,
+              profileStateDir: appPaths.profileDir,
+              codexHome: profileConfig.codex.codexHome,
+              inheritCodexHome: profileConfig.codex.inheritCodexHome,
+              ignoreUserConfig: profileConfig.codex.ignoreUserConfig,
+              ignoreRules: profileConfig.codex.ignoreRules,
+              larkChannel: {
+                profile: appPaths.profile,
+                rootDir: appPaths.rootDir,
+                configPath,
+                larkCliConfigDir: appPaths.larkCliConfigDir,
+                larkCliSourceConfigFile: appPaths.larkCliSourceConfigFile,
+              },
+            });
+            codexRuntime = new CodexRuntimeCoordinator(await codexSupervisor.start(), sessionCatalog);
+          }
           const workspaces = new WorkspaceStore(appPaths.workspacesFile);
           await workspaces.load();
 
@@ -193,6 +215,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
           } catch (err) {
             console.error('[disconnect-failed]', err);
           }
+          await codexSupervisor?.stop().catch((err) => log.warn('codex-runtime', 'stop-failed', { err: String(err) }));
           // unregister is best-effort sync — we're about to exit anyway.
           unregisterSync(entry.id, appPaths.userRegistryFile);
           await releaseRuntimeLocks(runtimeLocks);
@@ -259,6 +282,25 @@ export async function runStart(opts: StartOptions): Promise<void> {
                   `[restart] connecting new bridge with appId=${next.accounts.app.id} tenant=${next.accounts.app.tenant}...`,
                 );
                 const nextControls = makeControls(nextRuntime.appPaths, next, nextRuntime.profileConfig);
+                const runtimeChanged = codexRuntimeFingerprint(profileConfig) !== codexRuntimeFingerprint(nextRuntime.profileConfig);
+                let candidateSupervisor = codexSupervisor;
+                let candidateRuntime = codexRuntime;
+                if (runtimeChanged) {
+                  candidateSupervisor = undefined; candidateRuntime = undefined;
+                  if (nextRuntime.profileConfig.agentKind === 'codex' && nextRuntime.profileConfig.codex?.binaryPath) {
+                    candidateSupervisor = new CodexAppServerSupervisor({
+                      binary: process.env.LARK_CHANNEL_MANAGED_CODEX_BIN ?? nextRuntime.profileConfig.codex.binaryPath,
+                      profileStateDir: nextRuntime.appPaths.profileDir,
+                      codexHome: nextRuntime.profileConfig.codex.codexHome,
+                      inheritCodexHome: nextRuntime.profileConfig.codex.inheritCodexHome,
+                      ignoreUserConfig: nextRuntime.profileConfig.codex.ignoreUserConfig,
+                      ignoreRules: nextRuntime.profileConfig.codex.ignoreRules,
+                      larkChannel: { profile: nextRuntime.appPaths.profile, rootDir: nextRuntime.appPaths.rootDir, configPath: nextRuntime.configPath, larkCliConfigDir: nextRuntime.appPaths.larkCliConfigDir, larkCliSourceConfigFile: nextRuntime.appPaths.larkCliSourceConfigFile },
+                    });
+                    try { candidateRuntime = new CodexRuntimeCoordinator(await candidateSupervisor.start(), sessionCatalog); }
+                    catch (error) { await candidateSupervisor.stop().catch(() => {}); throw error; }
+                  }
+                }
                 // Connect-before-disconnect: if the new bridge fails to come up
                 // (e.g. network outage during a force-reconnect), throwing here
                 // leaves the old bridge — and its keepalive timer — untouched, so
@@ -266,15 +308,15 @@ export async function runStart(opts: StartOptions): Promise<void> {
                 // this ordering, a failed restart would tear down the only
                 // keepalive in the process and the bot would never recover until
                 // someone manually restarts it.
-                const next_bridge = await startChannel({
-                  cfg: next,
-                  agent: nextAgent,
-                  sessions,
-                  sessionCatalog,
-                  workspaces,
-                  controls: nextControls,
-                  appPaths: nextRuntime.appPaths,
-                });
+                let next_bridge: BridgeChannel;
+                try {
+                  next_bridge = await startChannel({ cfg: next, agent: nextAgent, sessions, sessionCatalog, workspaces, controls: nextControls, appPaths: nextRuntime.appPaths, codexRuntime: candidateRuntime });
+                } catch (error) { if (runtimeChanged) await candidateSupervisor?.stop().catch(() => {}); throw error; }
+                if (runtimeChanged) {
+                  try { await codexRuntime?.drain(); await codexSupervisor?.stop(); }
+                  catch (error) { await next_bridge.disconnect().catch(() => {}); await candidateSupervisor?.stop().catch(() => {}); throw error; }
+                  codexSupervisor = candidateSupervisor; codexRuntime = candidateRuntime;
+                }
                 console.log('[restart] disconnecting old bridge...');
                 try {
                   await bridge.disconnect();
@@ -330,6 +372,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
           workspaces,
           controls,
           appPaths,
+          codexRuntime,
         });
 
         // Backfill the bot's display name into the registry once WS handshake is
@@ -397,6 +440,7 @@ export function assertReconnectAgentKindUnchanged(
     );
   }
 }
+export function codexRuntimeFingerprint(profile: ProfileConfig): string { return profile.agentKind === 'codex' ? JSON.stringify({ codex: profile.codex, sandbox: profile.sandbox, model: profile.preferences.model }) : 'claude'; }
 
 export function createRuntimeAgent(
   profileConfig: ProfileConfig,
@@ -424,7 +468,7 @@ export function createRuntimeAgent(
       throw new Error('codex profile requires codex.binaryPath');
     }
     return new CodexAdapter({
-      binary: codex.binaryPath,
+      binary: process.env.LARK_CHANNEL_MANAGED_CODEX_BIN ?? codex.binaryPath,
       profileStateDir: appPaths.profileDir,
       ...(codex.codexHome ? { codexHome: codex.codexHome } : {}),
       inheritCodexHome: codex.inheritCodexHome === true,

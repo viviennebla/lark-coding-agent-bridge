@@ -717,7 +717,7 @@ async function listCodexResumeHistory(
   limit: number,
 ): Promise<CodexThreadHistoryEntry[]> {
   const codex = ctx.controls.profileConfig.codex;
-  const binary = codex?.binaryPath;
+  const binary = process.env.LARK_CHANNEL_MANAGED_CODEX_BIN ?? codex?.binaryPath;
   if (!binary) return [];
 
   const provider = ctx.codexHistoryProvider ?? listCodexThreadHistory;
@@ -727,8 +727,8 @@ async function listCodexResumeHistory(
       cwd,
       limit,
       profileStateDir: commandProfilePaths(ctx).profileDir,
-      ...(codex.codexHome ? { codexHome: codex.codexHome } : {}),
-      ...(codex.inheritCodexHome !== undefined
+      ...(codex?.codexHome ? { codexHome: codex.codexHome } : {}),
+      ...(codex?.inheritCodexHome !== undefined
         ? { inheritCodexHome: codex.inheritCodexHome }
         : {}),
     });

@@ -132,6 +132,43 @@ describe('Agent Console server', () => {
     ]);
   });
 
+  it('returns web prompt submissions before Feishu mirroring finishes', async () => {
+    let releaseMirror: (() => void) | undefined;
+    const h = await createHarness({
+      events: [],
+      mirror: true,
+      mirrorSend: () =>
+        new Promise((resolve) => {
+          releaseMirror = () => resolve({ messageId: 'om_console_slow' });
+        }),
+    });
+
+    const pendingResponse = postMessage(h.console, { text: 'ping', chatId: 'oc_test' });
+    const response = await Promise.race([
+      pendingResponse,
+      new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 50)),
+    ]);
+
+    expect(response).not.toBe('timeout');
+    expect((response as Response).status).toBe(202);
+    expect(await (response as Response).json()).toMatchObject({
+      ok: true,
+      mirrorChatId: 'oc_test',
+      mirrorPending: true,
+    });
+
+    const state = await getState(h.console);
+    expect(state.events.find((event) => event.type === 'message.user')).toMatchObject({
+      text: 'ping',
+      event: { mirrorChatId: 'oc_test', mirrorStatus: 'pending' },
+    });
+
+    releaseMirror?.();
+    await waitForState(h.console, (nextState) =>
+      nextState.events.some((event) => event.type === 'notification.sent'),
+    );
+  });
+
   it('persists console event history and supports cursor-based sync', async () => {
     const historyTmp = await createTmpProfile('agent-console-history-');
     cleanups.push(historyTmp.cleanup);
@@ -199,6 +236,11 @@ async function createHarness(options: {
   port?: number;
   historyFile?: string;
   mirror?: boolean;
+  mirrorSend?: (
+    chatId: string,
+    content: { markdown?: string; text?: string },
+    sendOptions?: { replyTo?: string; replyInThread?: true },
+  ) => Promise<{ messageId: string }>;
 } = {}): Promise<{
   agent: FakeAgentAdapter;
   console: AgentConsoleServerHandle;
@@ -272,6 +314,7 @@ async function createHarness(options: {
           sendOptions?: { replyTo?: string; replyInThread?: true },
         ): Promise<{ messageId: string }> {
           mirrorSent.push({ chatId, content, options: sendOptions });
+          if (options.mirrorSend) return options.mirrorSend(chatId, content, sendOptions);
           return { messageId: `om_console_${nextMirrorMessage++}` };
         },
       }
@@ -308,20 +351,20 @@ async function postMessage(console: AgentConsoleServerHandle, body: object): Pro
 
 async function getState(console: AgentConsoleServerHandle): Promise<{
   status: string;
-  events: Array<{ id?: string; type: string; text?: string }>;
+  events: Array<{ id?: string; type: string; text?: string; event?: unknown }>;
 }> {
   const response = await fetch(`${console.baseUrl}/api/state`);
   expect(response.status).toBe(200);
   return response.json() as Promise<{
     status: string;
-    events: Array<{ id?: string; type: string; text?: string }>;
+    events: Array<{ id?: string; type: string; text?: string; event?: unknown }>;
   }>;
 }
 
 async function waitForState(
   console: AgentConsoleServerHandle,
-  predicate: (state: { events: Array<{ id?: string; type: string; text?: string }> }) => boolean,
-): Promise<{ status: string; events: Array<{ id?: string; type: string; text?: string }> }> {
+  predicate: (state: { events: Array<{ id?: string; type: string; text?: string; event?: unknown }> }) => boolean,
+): Promise<{ status: string; events: Array<{ id?: string; type: string; text?: string; event?: unknown }> }> {
   for (let i = 0; i < 20; i++) {
     const state = await getState(console);
     if (predicate(state)) return state;

@@ -63,6 +63,13 @@ export class CodexAdapter implements AgentAdapter {
     this.botIdentity = identity;
   }
 
+  bridgePrompt(prompt: string): string {
+    return prefixBridgeSystemPrompt(prompt, this.botIdentity);
+  }
+  appServerRunConfig(): { ignoreUserConfig: boolean; ignoreRules: boolean } {
+    return { ignoreUserConfig: this.ignoreUserConfig, ignoreRules: this.ignoreRules };
+  }
+
   async isAvailable(): Promise<boolean> {
     return (await this.checkAvailability()).ok;
   }

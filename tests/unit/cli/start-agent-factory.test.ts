@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   assertReconnectAgentKindUnchanged,
+  codexRuntimeFingerprint,
   createRuntimeAgent,
 } from '../../../src/cli/commands/start.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
@@ -67,6 +68,14 @@ describe('start runtime agent factory', () => {
     });
 
     expect(profile.codex?.binaryPath).toBe('codex');
+  });
+  it('detects Codex supervisor configuration changes while leaving Claude stable', () => {
+    const one = createDefaultProfileConfig({ agentKind: 'codex', accounts: appAccount(), codex: { binaryPath: 'codex', codexHome: '/one', ignoreRules: true } }); const two = createDefaultProfileConfig({ agentKind: 'codex', accounts: appAccount(), codex: { binaryPath: 'codex-next', codexHome: '/two', ignoreRules: false, ignoreUserConfig: true } }); const modelOnly = structuredClone(one); modelOnly.preferences.model = 'gpt-next';
+    expect(codexRuntimeFingerprint(one)).not.toBe(codexRuntimeFingerprint(two)); expect(codexRuntimeFingerprint(one)).not.toBe(codexRuntimeFingerprint(modelOnly)); expect(codexRuntimeFingerprint(createDefaultProfileConfig({ agentKind: 'claude', accounts: appAccount() }))).toBe('claude');
+  });
+  it('keeps old Codex runtime references until candidate channel startup succeeds', async () => {
+    const source = await readFile(join(process.cwd(), 'src/cli/commands/start.ts'), 'utf8'); const restart = source.indexOf('const runtimeChanged'); const channelStart = source.indexOf('next_bridge = await startChannel', restart); const commit = source.indexOf('codexSupervisor = candidateSupervisor', restart); const rollback = source.indexOf('candidateSupervisor?.stop()', channelStart);
+    expect(restart).toBeGreaterThanOrEqual(0); expect(channelStart).toBeGreaterThan(restart); expect(commit).toBeGreaterThan(channelStart); expect(rollback).toBeGreaterThan(channelStart); expect(rollback).toBeLessThan(commit);
   });
 
   it('updates the process registry before releasing the old app lock during reconnect', async () => {

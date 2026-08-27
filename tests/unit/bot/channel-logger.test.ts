@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import * as channelModule from '../../../src/bot/channel.js';
 
 describe('Lark SDK logger noise filtering', () => {
@@ -58,5 +60,26 @@ describe('Lark SDK logger noise filtering', () => {
         },
       ]),
     ).toBe(false);
+  });
+});
+
+describe('startChannel initialization cleanup', () => {
+  it('atomically cleans post-connect resources before rethrowing initialization failures', async () => {
+    const source = await readFile(resolve(process.cwd(), 'src/bot/channel.ts'), 'utf8');
+    const connectAt = source.indexOf('await channel.connect();');
+    const catchAt = source.indexOf('} catch (error) {', connectAt);
+    const rethrowAt = source.indexOf('throw error;', catchAt);
+    const cleanup = source.slice(catchAt, rethrowAt);
+
+    expect(connectAt).toBeGreaterThan(-1);
+    expect(catchAt).toBeGreaterThan(connectAt);
+    expect(rethrowAt).toBeGreaterThan(catchAt);
+    expect(cleanup).toContain('ownerRefresh?.stop()');
+    expect(cleanup).toContain('knownChatsRefresh?.stop()');
+    expect(cleanup).toContain('keepalive?.stop()');
+    expect(cleanup).toContain('agentConsole?.close()');
+    expect(cleanup).toContain('activeRuns.stopAll()');
+    expect(cleanup).toContain('channel.disconnect()');
+    expect(cleanup).toContain('Promise.allSettled');
   });
 });

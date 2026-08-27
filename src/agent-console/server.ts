@@ -37,10 +37,11 @@ export interface AgentConsoleServerDeps {
 export interface AgentConsoleServerHandle {
   readonly baseUrl: string;
   readonly token: string;
+  publish(event: Omit<ConsoleEvent, 'id' | 'timestamp'>): ConsoleEvent;
   close(): Promise<void>;
 }
 
-interface ConsoleEvent {
+export interface ConsoleEvent {
   id: string;
   timestamp: string;
   type: string;
@@ -91,6 +92,7 @@ export async function startAgentConsoleServer(
   const now = deps.now ?? Date.now;
   const events: ConsoleEvent[] = await loadHistory(historyFile, MAX_EVENTS);
   const clients = new Set<ServerResponse>();
+  const pumpOwners = new Map<string, symbol>();
   let nextEventSeq = 0;
   await mkdir(dirname(historyFile), { recursive: true }).catch((err) =>
     log.warn('agent-console', 'history-dir-create-failed', {
@@ -168,6 +170,7 @@ export async function startAgentConsoleServer(
           publish,
           now,
           events,
+          pumpOwners,
         });
         json(res, result.status, result.body, actualPort);
         return;
@@ -208,6 +211,7 @@ export async function startAgentConsoleServer(
     return {
       baseUrl: `http://${host}:${actualPort}`,
       token,
+      publish,
       close: () => Promise.resolve(),
     };
   }
@@ -218,6 +222,7 @@ export async function startAgentConsoleServer(
   return {
     baseUrl: `http://${host}:${actualPort}`,
     token,
+    publish,
     close: () =>
       new Promise<void>((resolve, reject) => {
         for (const client of clients) client.end();
@@ -232,6 +237,7 @@ async function submitMessage(input: {
   publish: (event: Omit<ConsoleEvent, 'id' | 'timestamp'>) => ConsoleEvent;
   now: () => number;
   events: ConsoleEvent[];
+  pumpOwners: Map<string, symbol>;
 }): Promise<{ status: number; body: object }> {
   const body = isObject(input.body) ? input.body : {};
   const text = typeof body.text === 'string' ? body.text.trim() : '';
@@ -298,10 +304,14 @@ async function submitMessage(input: {
     events: input.events,
   });
   const mirror = mirrorTarget
-    ? await mirrorUserMessage({
+    ? mirrorUserMessage({
         channel: input.deps.mirrorChannel,
         chatId: mirrorTarget.chatId,
         text,
+        runId: execution.runId,
+        scope: scopeId,
+        agent: input.deps.agent.id,
+        profile: input.deps.controls.profile,
         publish: input.publish,
       })
     : undefined;
@@ -316,7 +326,7 @@ async function submitMessage(input: {
     cwd: cwdRealpath,
     prompt: text,
     text,
-    ...(mirrorTarget ? { event: { mirrorChatId: mirrorTarget.chatId } } : {}),
+    ...(mirrorTarget ? { event: { mirrorChatId: mirrorTarget.chatId, mirrorStatus: 'pending' } } : {}),
   });
   input.publish({
     type: 'message.user',
@@ -325,19 +335,21 @@ async function submitMessage(input: {
     source: 'web',
     prompt: text,
     text,
-    ...(mirrorTarget ? { event: { mirrorChatId: mirrorTarget.chatId, mirrorMessageId: mirror?.messageId } } : {}),
+    ...(mirrorTarget ? { event: { mirrorChatId: mirrorTarget.chatId, mirrorStatus: 'pending' } } : {}),
   });
+  const pumpOwner = Symbol(execution.runId); input.pumpOwners.set(execution.runId, pumpOwner);
   void pumpRunEvents(execution.subscribe(), {
     runId: execution.runId,
     scope: scopeId,
     agent: input.deps.agent.id,
     profile: input.deps.controls.profile,
     publish: input.publish,
+    owns: () => input.pumpOwners.get(execution.runId) === pumpOwner,
     mirror: mirrorTarget
       ? {
           channel: input.deps.mirrorChannel,
           chatId: mirrorTarget.chatId,
-          replyTo: mirror?.messageId,
+          userMessage: mirror,
         }
       : undefined,
   });
@@ -348,7 +360,7 @@ async function submitMessage(input: {
       ok: true,
       runId: execution.runId,
       scope: scopeId,
-      ...(mirrorTarget ? { mirrorChatId: mirrorTarget.chatId, mirrorMessageId: mirror?.messageId } : {}),
+      ...(mirrorTarget ? { mirrorChatId: mirrorTarget.chatId, mirrorPending: true } : {}),
     },
   };
 }
@@ -361,16 +373,18 @@ async function pumpRunEvents(
     agent: string;
     profile: string;
     publish: (event: Omit<ConsoleEvent, 'id' | 'timestamp'>) => ConsoleEvent;
+    owns?: () => boolean;
     mirror?: {
       channel?: AgentConsoleMirrorChannel;
       chatId: string;
-      replyTo?: string;
+      userMessage?: Promise<{ messageId?: string } | undefined>;
     };
   },
 ): Promise<void> {
   let assistantText = '';
   try {
     for await (const event of stream) {
+      if (opts.owns && !opts.owns()) return;
       if (event.type === 'text') {
         assistantText += event.delta;
       }
@@ -386,8 +400,15 @@ async function pumpRunEvents(
             profile: opts.profile,
             event: { mirrorChatId: opts.mirror?.chatId },
           });
+          const mirroredUser = await opts.mirror?.userMessage?.catch(() => undefined);
           await mirrorAssistantMessage({
-            mirror: opts.mirror,
+            mirror: opts.mirror
+              ? {
+                  channel: opts.mirror.channel,
+                  chatId: opts.mirror.chatId,
+                  replyTo: mirroredUser?.messageId,
+                }
+              : undefined,
             text: assistantText,
             publish: opts.publish,
             runId: opts.runId,
@@ -425,6 +446,10 @@ async function mirrorUserMessage(input: {
   channel?: AgentConsoleMirrorChannel;
   chatId: string;
   text: string;
+  runId: string;
+  scope: string;
+  agent: string;
+  profile: string;
   publish: (event: Omit<ConsoleEvent, 'id' | 'timestamp'>) => ConsoleEvent;
 }): Promise<{ messageId?: string } | undefined> {
   if (!input.channel) return undefined;
@@ -435,16 +460,22 @@ async function mirrorUserMessage(input: {
     input.publish({
       type: 'notification.sent',
       source: 'web',
-      scope: input.chatId,
+      runId: input.runId,
+      scope: input.scope,
+      agent: input.agent,
+      profile: input.profile,
       text: 'mirrored user message to Feishu',
-      event: { mirrorChatId: input.chatId, mirrorMessageId: result.messageId },
+      event: { mirrorChatId: input.chatId, mirrorMessageId: result.messageId, stage: 'user-message' },
     });
     return result;
   } catch (err) {
     input.publish({
       type: 'notification.failed',
       source: 'web',
-      scope: input.chatId,
+      runId: input.runId,
+      scope: input.scope,
+      agent: input.agent,
+      profile: input.profile,
       text: err instanceof Error ? err.message : String(err),
       event: { mirrorChatId: input.chatId, stage: 'user-message' },
     });
@@ -484,6 +515,7 @@ async function mirrorAssistantMessage(input: {
         mirrorChatId: input.mirror.chatId,
         mirrorMessageId: result.messageId,
         replyTo: input.mirror.replyTo,
+        stage: 'assistant-message',
       },
     });
   } catch (err) {
@@ -542,7 +574,7 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
-function mapAgentEvent(event: AgentEvent): { type: string; text: string } {
+export function mapAgentEvent(event: AgentEvent): { type: string; text: string } {
   switch (event.type) {
     case 'system':
       return { type: 'system.notice', text: 'system.notice' };

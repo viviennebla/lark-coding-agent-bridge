@@ -1,6 +1,16 @@
 {
   "name": "lark-channel-bridge",
   "version": "0.5.5",
+  "larkChannelBundle": {
+    "schema": "lark-channel-bundle.v1",
+    "bundleVersion": "0.5.5",
+    "protocolRevision": "codex-app-server-0.141",
+    "components": {
+      "bridge": { "package": "lark-channel-bridge", "version": "0.5.5", "integrity": "sha512-5fsEiXhK+yPczJ7hlsSno3wqDSPTEapOMOI8l30PerlGsXP/HUKNu2MrGEhmMR9tkG9FfXX5IqB4cqlVtKT89Q==" },
+      "codex": { "package": "@openai/codex", "version": "0.141.0", "integrity": "sha512-ACpAn/Z7JwBg431040zKOLpBtNdP024ixqwC/R2YM5tPrLG0wfSmrd/AVHPUExt6hOO6fEHwxM/ixAyzFleQXw==" },
+      "larkCli": { "package": "@larksuite/cli", "version": "1.0.76", "integrity": "sha512-hyFQBF3bXLFvklAqqTE/TApC7ylLgaySvEEMXbZw2IghjkUp0zsVtknClQLkn43UKIW/gS/ho5TEO4Xe3dBWMw==" }
+    }
+  },
   "description": "Bridge Feishu/Lark messenger with local CLI coding agents",
   "type": "module",
   "packageManager": "pnpm@10.33.0",

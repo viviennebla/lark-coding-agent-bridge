@@ -47,7 +47,7 @@ function pathExts(): string[] {
 export async function detectInstalledAgents(): Promise<DetectedAgent[]> {
   const candidates: Array<{ kind: AgentKind; command: string }> = [
     { kind: 'claude', command: process.env.LARK_CHANNEL_CLAUDE_BIN ?? 'claude' },
-    { kind: 'codex', command: process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex' },
+    { kind: 'codex', command: process.env.LARK_CHANNEL_MANAGED_CODEX_BIN ?? process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex' },
   ];
   const detected: DetectedAgent[] = [];
   for (const candidate of candidates) {

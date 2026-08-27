@@ -24,6 +24,8 @@ import {
   runServiceUnregister,
 } from './commands/service';
 import { runStart } from './commands/start';
+import { runUpdateApply, runUpdateCheck, runUpdateRollback, runUpdateStatus } from './commands/update';
+import { resolveValidatedManagedLauncher, runManagedLauncher } from '../update/launcher';
 
 const program = new Command();
 
@@ -196,6 +198,12 @@ program
     await runServiceStatus({ profile: opts.profile });
   });
 
+const update = program.command('update').description('Manage verified compatibility-bundle updates');
+update.command('check').requiredOption('--manifest <path-or-url>').option('--profile <name>').action(runUpdateCheck);
+update.command('status').option('--profile <name>').action(runUpdateStatus);
+update.command('apply').requiredOption('--manifest <path-or-url>').option('--profile <name>').action(runUpdateApply);
+update.command('rollback').option('--profile <name>').action(runUpdateRollback);
+
 program
   .command('unregister')
   .description('Remove the OS service registration (bootout + delete plist)')
@@ -241,7 +249,14 @@ secrets
     await runSecretsRemove(opts.appId, { profile: opts.profile });
   });
 
-program.parseAsync(process.argv).catch((err: unknown) => {
+async function main(): Promise<void> {
+  if (process.argv[2] === 'run' && process.env.LARK_CHANNEL_MANAGED_LAUNCH !== '1' && await resolveValidatedManagedLauncher()) {
+    process.exitCode = await runManagedLauncher(process.argv.slice(2));
+    return;
+  }
+  await program.parseAsync(process.argv);
+}
+main().catch((err: unknown) => {
   const diagnostic = getAgentPreflightDiagnostic(err);
   if (diagnostic) {
     console.error(formatAgentPreflightDiagnostic(diagnostic));

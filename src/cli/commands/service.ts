@@ -17,6 +17,11 @@ import { checkRuntimeLock, type RuntimeLockMeta } from '../../runtime/locks';
 import { preFlightChecks } from '../preflight';
 import { promptAndStopActiveBridgeMigrationConflict } from './migrate';
 import { stopProcessEntry, type StopProcessEntryResult } from './ps';
+import { withUpdateLock } from '../../update/manager';
+import { resolveUpdatePaths } from '../../update/paths';
+import { resolveValidatedManagedLauncher } from '../../update/launcher';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 export interface ServiceStartOptions {
   profile?: string;
@@ -267,7 +272,14 @@ async function reportConnectAfter(
  * they've switched runtime versions or updated their PATH since last install.
  */
 export async function runServiceStart(opts: ServiceStartOptions = {}): Promise<void> {
-  const { profile, cfg, profileConfig, appPaths, configPath } = await ensureBridgeConfigured(opts);
+  const configured = await ensureBridgeConfigured(opts);
+  const configuredRoot = configured.appPaths.rootDir ?? paths.rootDir;
+  const portableRoot = process.platform === 'win32' && configuredRoot.startsWith('/tmp/') ? join(tmpdir(), configuredRoot.slice('/tmp/'.length)) : configuredRoot;
+  const updateRoot = join(portableRoot, 'runtime');
+  return withUpdateLock(resolveUpdatePaths(updateRoot), () => runServiceStartUnlocked(opts, configured, updateRoot));
+}
+async function runServiceStartUnlocked(opts: ServiceStartOptions, configured: Awaited<ReturnType<typeof ensureBridgeConfigured>>, updateRoot: string): Promise<void> {
+  const { profile, cfg, profileConfig, appPaths, configPath } = configured;
   const adapter = requireAdapter('start', profile);
   await assertLockNotHeldByAnotherRuntime('profile', appPaths.profileLockFile, adapter, opts);
   await assertLockNotHeldByAnotherRuntime('app', appPaths.appLockFile(cfg.accounts.app.id), adapter, opts);
@@ -293,7 +305,10 @@ export async function runServiceStart(opts: ServiceStartOptions = {}): Promise<v
     },
   });
 
-  await adapter.install();
+  const managedLauncher = await resolveValidatedManagedLauncher(updateRoot);
+  const inheritedEntry = process.env.LARK_CHANNEL_BRIDGE_ENTRY;
+  if (managedLauncher) process.env.LARK_CHANNEL_BRIDGE_ENTRY = managedLauncher;
+  try { await adapter.install(); } finally { if (inheritedEntry === undefined) delete process.env.LARK_CHANNEL_BRIDGE_ENTRY; else process.env.LARK_CHANNEL_BRIDGE_ENTRY = inheritedEntry; }
 
   // If already running, stop first so start operations don't race.
   if (adapter.isRunning()) {

@@ -79,10 +79,9 @@ export class ActiveRuns {
     if (!h) return false;
     this.reservations.delete(chatId);
     h.interrupted = true;
-    this.handles.delete(chatId);
-    void h.run.stop().catch(() => {
-      /* stop errors are non-fatal */
-    });
+    void h.run.stop().finally(() => {
+      this.unregister(chatId, h.run);
+    }).catch(() => { /* stop errors are non-fatal */ });
     return true;
   }
 

@@ -22,6 +22,7 @@ export interface SubmitRunInput {
   threadId?: string;
   model?: string;
   images?: readonly string[];
+  messageId?: string;
   stopGraceMs?: number;
   nowait?: boolean;
   observability?: {

@@ -50,6 +50,8 @@ import { canUseDm, canUseGroup } from '../policy/access';
 import type { ScopeContext } from '../policy/run-policy';
 import { createOwnerRefreshController } from '../policy/owner';
 import { RunExecutor } from '../runtime/run-executor';
+import { CodexRunExecutor } from '../runtime/codex-run-executor';
+import type { CodexRuntimeCoordinator } from '../runtime/codex-runtime-coordinator';
 import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
@@ -67,6 +69,7 @@ import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
 import {
+  mapAgentEvent,
   startAgentConsoleServer,
   type AgentConsoleServerHandle,
 } from '../agent-console/server';
@@ -181,6 +184,7 @@ export interface StartChannelDeps {
   workspaces: WorkspaceStore;
   controls: Controls;
   appPaths?: Pick<AppPaths, 'secretsFile' | 'keystoreSaltFile' | 'mediaDir'>;
+  codexRuntime?: CodexRuntimeCoordinator;
 }
 
 export async function startChannel(deps: StartChannelDeps): Promise<BridgeChannel> {
@@ -192,7 +196,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // Concurrency cap — reads `preferences.maxConcurrentRuns` on each acquire,
   // so /config bumps take effect for the next run.
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
-  const executor = new RunExecutor({ agent, pool, activeRuns });
+  const executor = deps.codexRuntime
+    ? new CodexRunExecutor({ agent, pool, activeRuns }, deps.codexRuntime, activeRuns)
+    : new RunExecutor({ agent, pool, activeRuns });
 
   // Resolve the App Secret to plaintext. The config field can be a literal
   // string, a "${VAR}" template, or a {source, id} SecretRef referencing
@@ -283,7 +289,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const pending = new PendingQueue(DEBOUNCE_MS, (scope, batch) => {
     const firstMsg = batch[0];
     if (!firstMsg) return;
-    pending.block(scope);
+    const blockWhileRunning = agent.id !== 'codex';
+    if (blockWhileRunning) pending.block(scope);
     void withTrace({ chatId: firstMsg.chatId }, async () => {
       log.info('flush', 'start', {
         scope,
@@ -309,6 +316,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         }
         await runAgentBatch({
           channel,
+          agentConsole,
           executor,
           sessions,
           sessionCatalog,
@@ -326,7 +334,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       } catch (err) {
         log.fail('flush', err);
       } finally {
-        pending.unblock(scope);
+        if (blockWhileRunning) pending.unblock(scope);
         log.info('flush', 'end');
       }
     });
@@ -351,6 +359,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           chatModeCache,
           logThreadModeOverride,
           executor,
+          codexRuntime: deps.codexRuntime,
           pool,
         }),
       ).catch((err) => log.fail('intake', err));
@@ -428,16 +437,20 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     },
   });
 
-  await channel.connect();
-  const ownerRefresh = createOwnerRefreshController({
-    controls,
-    source: channel,
-    appId: cfg.accounts.app.id,
-  });
-  await ownerRefresh.start();
-  const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
+  let ownerRefresh: ReturnType<typeof createOwnerRefreshController> | undefined;
+  let knownChatsRefresh: ReturnType<typeof startKnownChatsRefreshTimer> | undefined;
+  let keepalive: ReturnType<typeof startKeepalive> | undefined;
+  try {
+    await channel.connect();
+    ownerRefresh = createOwnerRefreshController({
+      controls,
+      source: channel,
+      appId: cfg.accounts.app.id,
+    });
+    await ownerRefresh.start();
+    knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
 
-  const identity = channel.botIdentity;
+    const identity = channel.botIdentity;
   // Late-bind the bot's own IM identity into the agent adapter so the system
   // prompt can state "this open_id is you" with the real value. Covers both
   // initial start and credential-swap reconnects (both go through here).
@@ -463,13 +476,13 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     cfg.accounts.app.tenant === 'lark'
       ? 'https://open.larksuite.com'
       : 'https://open.feishu.cn';
-  const keepalive = startKeepalive({
+    keepalive = startKeepalive({
     channel,
     domain: probeDomain,
     forceReconnect: () => controls.restart(),
   });
 
-  agentConsole = await startAgentConsoleServer({
+    agentConsole = await startAgentConsoleServer({
     agent,
     activeRuns,
     controls,
@@ -477,15 +490,27 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     mirrorChannel: channel,
     pool,
     workspaces,
-  });
+    });
+  } catch (error) {
+    await Promise.allSettled([
+      Promise.resolve().then(() => ownerRefresh?.stop()),
+      Promise.resolve().then(() => knownChatsRefresh?.stop()),
+      Promise.resolve().then(() => keepalive?.stop()),
+      Promise.resolve().then(() => pending.cancelAll()),
+      agentConsole?.close(),
+      activeRuns.stopAll(),
+      channel.disconnect(),
+    ]);
+    throw error;
+  }
 
   return {
     channel,
     disconnect: async () => {
       activeRuns.pauseNewRuns('bridge-disconnect');
-      ownerRefresh.stop();
-      knownChatsRefresh.stop();
-      keepalive.stop();
+      ownerRefresh?.stop();
+      knownChatsRefresh?.stop();
+      keepalive?.stop();
       pending.cancelAll();
       const [consoleResult, disconnectResult, stopAllResult, ...flushResults] = await Promise.allSettled([
         agentConsole?.close(),
@@ -563,6 +588,7 @@ interface IntakeDeps {
   logThreadModeOverride: LogThreadModeOverride;
   executor: RunExecutor;
   pool: ProcessPool;
+  codexRuntime?: CodexRuntimeCoordinator;
 }
 
 type LogThreadModeOverride = (input: {
@@ -706,6 +732,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
 
 interface RunBatchDeps {
   channel: LarkChannel;
+  agentConsole?: AgentConsoleServerHandle;
   executor: RunExecutor;
   sessions: SessionStore;
   sessionCatalog?: SessionCatalog;
@@ -724,6 +751,7 @@ interface RunBatchDeps {
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const {
     channel,
+    agentConsole,
     executor,
     sessions,
     sessionCatalog,
@@ -880,6 +908,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     scopeId: scope,
     scope: scopeContext,
     prompt,
+    messageId: lastMsg.messageId,
     attachments: attachments.map(toPolicyAttachment),
     access: accessDecision,
     capability,
@@ -912,6 +941,53 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   activePolicyFingerprints.set(scope, flow.policy.policyFingerprint);
   const handle = execution.handle;
   const eventStream = execution.subscribe();
+  const consoleContext = {
+    runId: execution.runId,
+    scope,
+    source: 'im',
+    agent: capability.agentId,
+    profile: controls.profile,
+  };
+  const consoleUserText = summarizeBatchForConsole(batch);
+  agentConsole?.publish({
+    type: 'task.started',
+    ...consoleContext,
+    cwd,
+    prompt: consoleUserText,
+    text: consoleUserText,
+    event: {
+      chatId,
+      messageId: lastMsg.messageId,
+      threadId,
+      messagePosition: 0,
+    },
+  });
+  agentConsole?.publish({
+    type: 'message.user',
+    ...consoleContext,
+    prompt: consoleUserText,
+    text: consoleUserText,
+    event: {
+      chatId,
+      messageId: lastMsg.messageId,
+      threadId,
+      batchSize: batch.length,
+      messagePosition: 1,
+    },
+  });
+  const publishConsoleAgentEvent = (evt: AgentEvent): void => {
+    if (!agentConsole) return;
+    agentConsole.publish({
+      ...mapAgentEvent(evt),
+      ...consoleContext,
+      event: {
+        ...evt,
+        chatId,
+        messageId: lastMsg.messageId,
+        threadId,
+      },
+    });
+  };
   if (flow.resumeFrom) {
     log.info('session', 'resume', { sessionId: flow.resumeFrom, cwd });
   } else {
@@ -1016,6 +1092,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           idleTimeoutMs,
           recordSession,
           async () => {},
+          publishConsoleAgentEvent,
         );
         await cotDone;
         if (cotPublisher.degradedReason) {
@@ -1059,6 +1136,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             await cardCtrl.update(renderCard(filterForPrefs(state), cardRenderOptions));
           }
         },
+        publishConsoleAgentEvent,
       );
       const streamDone = channel.stream(
         chatId,
@@ -1104,6 +1182,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             await markdownCtrl.setContent(renderText(filterForPrefs(state)));
           }
         },
+        publishConsoleAgentEvent,
       );
       const streamDone = channel.stream(
         chatId,
@@ -1140,6 +1219,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         idleTimeoutMs,
         recordSession,
         async () => {},
+        publishConsoleAgentEvent,
       );
       await sendFinalReply({
         channel,
@@ -1271,6 +1351,7 @@ async function processAgentStream(
   idleTimeoutMs: number | undefined,
   recordSession: (event: AgentEvent) => void,
   flush: (state: RunState) => Promise<void>,
+  observe?: (event: AgentEvent) => void,
 ): Promise<RunState> {
   const runStart = Date.now();
   let state: RunState = initialState;
@@ -1311,6 +1392,7 @@ async function processAgentStream(
   try {
     for await (const evt of events) {
       if (handle.interrupted) break;
+      observe?.(evt);
 
       // Track tool flight before re-arming the idle timer so the arm step
       // sees the correct set size. tool_use opens a window; tool_result
@@ -1382,6 +1464,10 @@ async function processAgentStream(
     await handle.run.stop();
   }
   return state;
+}
+
+function summarizeBatchForConsole(batch: readonly NormalizedMessage[]): string {
+  return batch.map((message) => message.content.trim()).filter(Boolean).join('\n\n');
 }
 
 async function awaitRenderAwareStream(input: {

@@ -60,6 +60,7 @@ const state = {
   events: [],
   filter: "message",
   lastServerEventId: "",
+  localMessageSeq: 0,
   pendingAssistant: null,
   seenEventKeys: new Set(),
   selectedSkill: null,
@@ -320,6 +321,8 @@ function appendLocalEvent(type, text, tone = "info") {
 }
 
 function appendEvent(event) {
+  applyMirrorNotification(event);
+  removeOptimisticUserEcho(event);
   if (!markEventSeen(event)) return;
   rememberServerEvent(event);
   applyRealtimeStatus(event);
@@ -348,6 +351,8 @@ function mergeSnapshotEvents(events) {
 
     if (!markEventSeen(event)) return;
     rememberServerEvent(event);
+    applyMirrorNotification(event);
+    removeOptimisticUserEcho(event);
     ingestConsoleEvent(event);
     changed = true;
   });
@@ -446,6 +451,9 @@ function normalizeEvent(event) {
 }
 
 function ingestConsoleEvent(event) {
+  if (event.type === "notification.sent" || event.type === "notification.failed") {
+    applyMirrorNotification(event);
+  }
   if (event.type === "message.assistant.delta") {
     mergeAssistantDelta(event);
     return;
@@ -456,6 +464,82 @@ function ingestConsoleEvent(event) {
   }
 
   state.events.push(normalizeEvent(event));
+}
+
+function appendOptimisticUserMessage(input) {
+  const localId = `local-user-${++state.localMessageSeq}`;
+  const event = normalizeEvent({
+    id: localId,
+    type: "message.user",
+    text: input.text,
+    timestamp: new Date().toISOString(),
+    source: "web",
+    payload: {
+      id: localId,
+      localPending: true,
+      mirrorStatus: input.mirrorStatus || "pending",
+      skill: input.skill,
+    },
+  });
+  state.seenEventKeys.add(`id:${localId}`);
+  state.events.push(event);
+  if (state.events.length > MAX_EVENTS) {
+    state.events.splice(0, state.events.length - MAX_EVENTS);
+  }
+  renderEvents();
+  return localId;
+}
+
+function updateOptimisticUserMessage(localId, patch) {
+  const target = state.events.find((event) => event.id === localId);
+  if (!target) return;
+  target.runId = patch.runId || target.runId;
+  target.scope = patch.scope || target.scope;
+  target.payload = { ...(target.payload || {}), ...patch };
+  renderEvents();
+}
+
+function removeOptimisticUserEcho(event) {
+  if (event.type !== "message.user" || event.id?.startsWith("local-user-")) return;
+  const text = String(event.text || "").trim();
+  const index = state.events.findIndex(
+    (item) =>
+      item.type === "message.user" &&
+      (item.payload?.localPending || item.id?.startsWith("local-user-")) &&
+      String(item.text || "").trim() === text &&
+      (!item.runId || !event.runId || item.runId === event.runId),
+  );
+  if (index < 0) return;
+  state.seenEventKeys.delete(`id:${state.events[index].id}`);
+  state.events.splice(index, 1);
+}
+
+function applyMirrorNotification(event) {
+  const stage = event.payload?.event?.stage || event.event?.stage;
+  if (stage !== "user-message") return;
+  const status = event.type === "notification.failed" ? "failed" : "sent";
+  const mirrorMessageId = event.payload?.event?.mirrorMessageId || event.event?.mirrorMessageId;
+  const target = findUserMirrorTarget(event);
+  if (!target) return;
+  target.payload = {
+    ...(target.payload || {}),
+    mirrorStatus: status,
+    mirrorMessageId: mirrorMessageId || target.payload?.mirrorMessageId,
+  };
+}
+
+function findUserMirrorTarget(event) {
+  if (event.runId) {
+    for (let index = state.events.length - 1; index >= 0; index -= 1) {
+      const candidate = state.events[index];
+      if (candidate.type === "message.user" && candidate.runId === event.runId) return candidate;
+    }
+  }
+  for (let index = state.events.length - 1; index >= 0; index -= 1) {
+    const candidate = state.events[index];
+    if (candidate.type === "message.user" && candidate.payload?.localPending) return candidate;
+  }
+  return null;
 }
 
 function mergeAssistantDelta(event) {
@@ -571,7 +655,25 @@ function renderEventContent(event, text, role, isCard) {
   if (role === "system") {
     return `<div class="system-text">${renderMarkdown(text)}</div>`;
   }
-  return `<div class="markdown-body">${renderMarkdown(text)}</div>`;
+  return `<div class="markdown-body">${renderMarkdown(text)}</div>${role === "user" ? renderUserDeliveryStatus(event) : ""}`;
+}
+
+function renderUserDeliveryStatus(event) {
+  const status = userMirrorStatus(event);
+  const localPending = event.payload?.localPending;
+  if (!status && !localPending) return "";
+  if (status === "failed") {
+    const message = event.payload?.error || event.text || "飞书同步失败";
+    return `<div class="delivery-status failed" title="${escapeAttr(String(message))}">飞书同步失败</div>`;
+  }
+  if (status === "sent") {
+    return `<div class="delivery-status sent">已同步到飞书</div>`;
+  }
+  return `<div class="delivery-status pending"><span class="delivery-spinner" aria-hidden="true"></span>同步飞书中</div>`;
+}
+
+function userMirrorStatus(event) {
+  return event.payload?.mirrorStatus || event.payload?.event?.mirrorStatus || event.event?.mirrorStatus || "";
 }
 
 function isLarkCardEvent(event, text) {
@@ -954,25 +1056,42 @@ function classifyEvent(type, explicitTone) {
 async function sendMessage(event) {
   event.preventDefault();
 
-  const text = els.messageInput.value.trim();
-  if (!text) return;
+  const request = prepareMessageRequest(els.messageInput.value);
+  if (!request.text) return;
 
   els.sendButton.disabled = true;
+  els.messageInput.value = "";
+  resizeMessageInput();
+  updateCommandHint();
+  const localId = appendOptimisticUserMessage({
+    text: request.displayText,
+    skill: request.skill,
+    mirrorStatus: request.command ? "" : "pending",
+  });
 
   try {
-    await requestJson("/api/message", {
+    const response = await requestJson("/api/message", {
       method: "POST",
       body: JSON.stringify({
-        text,
-        skill: shouldAttachSelectedSkill(text) ? state.selectedSkill?.name : undefined,
+        text: request.text,
+        skill: request.skill,
         source: "web",
       }),
     });
-    els.messageInput.value = "";
-    resizeMessageInput();
-    updateCommandHint();
+    updateOptimisticUserMessage(localId, {
+      localPending: false,
+      runId: response?.runId,
+      scope: response?.scope,
+      mirrorStatus: response?.mirrorPending ? "pending" : "",
+    });
+    clearSelectedSkill({ preserveInput: true });
     await loadState().catch(() => null);
   } catch (error) {
+    updateOptimisticUserMessage(localId, {
+      localPending: false,
+      mirrorStatus: "failed",
+      error: error.message,
+    });
     appendLocalEvent("system.notice", `发送失败：${error.message}`, "error");
   } finally {
     els.sendButton.disabled = false;
@@ -980,23 +1099,63 @@ async function sendMessage(event) {
   }
 }
 
+function prepareMessageRequest(value) {
+  const original = String(value || "").trim();
+  const skillToken = parseSkillToken(original);
+  const selectedSkill = shouldAttachSelectedSkill(original) ? state.selectedSkill?.name : undefined;
+  const skill = skillToken?.skill || selectedSkill;
+  const text = skillToken ? skillToken.text.trim() : original;
+  return {
+    command: text.startsWith("/"),
+    displayText: skill ? `$${skill} ${text}`.trim() : text,
+    skill,
+    text,
+  };
+}
+
+function parseSkillToken(text) {
+  const match = String(text || "").trim().match(/^\$([A-Za-z0-9_.:-]+)(?:\s+([\s\S]*))?$/);
+  if (!match) return null;
+  return { skill: match[1], text: match[2] || "" };
+}
+
 function shouldAttachSelectedSkill(text) {
-  return Boolean(state.selectedSkill?.name && !text.startsWith("/"));
+  return Boolean(state.selectedSkill?.name && !text.startsWith("/") && !parseSkillToken(text));
 }
 
 function selectSkill(skillName) {
   state.selectedSkill = state.skills.find((item) => item.name === skillName) || { name: skillName };
   els.selectedSkillLabel.innerHTML = `已选择 <strong>${escapeHtml(state.selectedSkill.name)}</strong>`;
   els.clearSkillButton.disabled = false;
+  insertSkillToken(state.selectedSkill.name);
   renderSkills();
   els.messageInput.focus();
 }
 
-function clearSelectedSkill() {
+function clearSelectedSkill(options = {}) {
   state.selectedSkill = null;
   els.selectedSkillLabel.textContent = "未选择 skill";
   els.clearSkillButton.disabled = true;
+  if (!options.preserveInput) {
+    els.messageInput.value = removeLeadingSkillToken(els.messageInput.value);
+    resizeMessageInput();
+    updateCommandHint();
+  }
   renderSkills();
+}
+
+function insertSkillToken(skillName) {
+  const token = `$${skillName}`;
+  const text = removeLeadingSkillToken(els.messageInput.value).trimStart();
+  els.messageInput.value = `${token}${text ? ` ${text}` : " "}`;
+  els.messageInput.selectionStart = els.messageInput.value.length;
+  els.messageInput.selectionEnd = els.messageInput.value.length;
+  resizeMessageInput();
+  updateCommandHint();
+}
+
+function removeLeadingSkillToken(value) {
+  return String(value || "").replace(/^\s*\$[A-Za-z0-9_.:-]+(?:\s+|$)/, "");
 }
 
 function updateCommandHint() {
