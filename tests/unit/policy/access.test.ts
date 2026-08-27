@@ -5,9 +5,11 @@ import {
   canUseDm,
   canUseGroup,
   isCreator,
+  requireMentionForChat,
   type RuntimeControls,
 } from '../../../src/policy/access';
 import { createDefaultProfileConfig, type ProfileConfig } from '../../../src/config/profile-schema';
+import type { AppConfig } from '../../../src/config/schema';
 
 const ownerControls: RuntimeControls = {
   botOwnerId: 'ou_owner',
@@ -100,6 +102,27 @@ describe('access policy', () => {
     expect(canRunAdminCommand(withAdmin, ownerControls, 'ou_admin').ok).toBe(true);
   });
 
+  it('opens usage to everyone in team mode without touching admin gating', () => {
+    const team = profileWithAccess({}, 'team');
+
+    // Anyone can use DMs and groups — no allowlist needed.
+    expect(canUseDm(team, ownerControls, 'ou_stranger')).toEqual({
+      ok: true,
+      reason: 'allowed-team',
+    });
+    expect(canUseGroup(team, ownerControls, 'chat_random', 'ou_stranger')).toEqual({
+      ok: true,
+      reason: 'allowed-team',
+    });
+
+    // Admin/sensitive commands are still owner/admin-gated.
+    expect(canRunAdminCommand(team, ownerControls, 'ou_stranger').ok).toBe(false);
+    expect(canRunAdminCommand(team, ownerControls, 'ou_owner').ok).toBe(true);
+
+    const teamWithAdmin = profileWithAccess({ admins: ['ou_admin'] }, 'team');
+    expect(canRunAdminCommand(teamWithAdmin, ownerControls, 'ou_admin').ok).toBe(true);
+  });
+
   it('does not include runtime owner state in the access policy digest', () => {
     const profile = profileWithAccess({
       allowedUsers: ['ou_a'],
@@ -117,9 +140,34 @@ describe('access policy', () => {
   });
 });
 
-function profileWithAccess(access: Partial<ProfileConfig['access']> = {}): ProfileConfig {
+describe('requireMentionForChat', () => {
+  const globalOn = { preferences: { requireMentionInGroup: true } } as AppConfig;
+  const globalOff = { preferences: { requireMentionInGroup: false } } as AppConfig;
+
+  it('follows the global setting when a chat has no override', () => {
+    const profile = profileWithAccess();
+    expect(requireMentionForChat(profile, globalOn, 'oc_x')).toBe(true);
+    expect(requireMentionForChat(profile, globalOff, 'oc_x')).toBe(false);
+  });
+
+  it('lets a per-chat override win over the global setting, both directions', () => {
+    const profile = profileWithAccess({ chatRequireMention: { oc_open: false, oc_strict: true } });
+    // Global requires @, but oc_open overrides to respond-to-all.
+    expect(requireMentionForChat(profile, globalOn, 'oc_open')).toBe(false);
+    // Global responds to all, but oc_strict overrides to require @.
+    expect(requireMentionForChat(profile, globalOff, 'oc_strict')).toBe(true);
+    // An unlisted chat still follows the global setting.
+    expect(requireMentionForChat(profile, globalOn, 'oc_other')).toBe(true);
+  });
+});
+
+function profileWithAccess(
+  access: Partial<ProfileConfig['access']> = {},
+  mode: ProfileConfig['mode'] = 'personal',
+): ProfileConfig {
   return createDefaultProfileConfig({
     agentKind: 'claude',
+    mode,
     accounts: {
       app: {
         id: 'cli_test',

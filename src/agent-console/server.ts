@@ -598,6 +598,8 @@ export function mapAgentEvent(event: AgentEvent): { type: string; text: string }
         type: event.terminationReason === 'interrupted' ? 'task.interrupted' : 'task.failed',
         text: event.message,
       };
+    default:
+      return { type: 'system.notice', text: 'system.notice' };
   }
 }
 
